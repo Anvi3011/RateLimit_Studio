@@ -1,0 +1,26 @@
+# Readiness, limitations, and verification record
+
+## Implemented and locally verified in this hardening pass
+
+- Browser end-to-end coverage is defined with Playwright for policy edits/apply/refresh/reload, traffic generation, Traffic Inspector, fault controls, real reverse-proxy timeout, expiry, and recovery. It requires a running Compose stack, `FAULTS_ENABLED=true`, `ADMIN_TOKEN`, and Chromium.
+- Network timeout injection holds a real HTTP request for six seconds, beyond the frontend Nginx three-second upstream read timeout. The UI therefore receives an upstream timeout response. The Redis fault key expires automatically; all temporary faults accept a bounded 1–300 second TTL (default 60) and can also be reset immediately.
+- Metrics charts read an API time series derived from actual Redis decision samples. Samples are capped at 10,000 and one hour; empty buckets are zero, and the UI labels the data source. No sample data is fabricated.
+- Invalid admin tokens are throttled by a Redis counter keyed by a hash of the trusted client address: five failures per 60-second window returns HTTP 429 with `Retry-After`. Nginx adds a second rate limit to sensitive routes. Backend tests cover the auth throttle.
+- Event publishing now uses a Redis outbox capped at `OUTBOX_CAPACITY` (default 5,000), a dedicated relay, durable RabbitMQ publish confirms, retry backoff, an inflight list recovered after relay restarts, and a bounded 1,000-event failed list after eight attempts. Metrics expose backlog, inflight, failed, overflow and publish failures. API/Redis/RabbitMQ/worker/publisher health is aggregated.
+- Nginx configurations add request limits and security headers; a separate TLS profile uses the provided production proxy configuration and a host-mounted certificate directory. The TLS profile passed Nginx configuration validation and a temporary self-signed local smoke test (HTTP redirect, HTTPS health, HSTS). Public certificate issuance, installation, renewal and monitoring remain operational tasks.
+
+## Remaining gaps before public production use
+
+- Local runtime inspection found Pika 1.3.2 returns `None` on a successful `BlockingChannel.basic_publish` confirm; the relay treated that falsey value as a failed publish. The publisher now relies on confirm-mode exceptions for NACK/unroutable handling and sets `mandatory=true`; a regression test covers the `None`-on-ACK case. Worker/publisher tests now pass 7/7. After rebuilding the local publisher, 4,477 events were confirmed and the existing Redis outbox drained from 4,478 to 0. The existing bounded failed list has 28 entries from the prior behavior; it remains intact for operator review, with no automatic replay or deletion. Reconcile it before relying on event completeness.
+- Local Linux Docker Engine (`linux/x86_64`) built backend, worker, publisher, frontend, and Locust images; Compose config passed and the running local services were healthy. This does not prove deployment on an EC2 host or a Learner Lab account. The optional Playwright Docker image download (786 MB browser base) was stopped for low transfer rate; browser tests had passed using host Chrome.
+
+- The checks were local Docker Compose runs only. They do not verify AWS networking, EC2 sizing, public DNS, certificate issuance/renewal, or performance at the intended deployment size.
+- The network-timeout injection holds the synchronous backend request for up to six seconds. Keep fault injection disabled outside a private, isolated test environment.
+- The repeatable local benchmarks are preserved in `benchmarks/reports/local-comparison.csv` and `.json`. With matched 20-user, 5/sec spawn, 10-second workloads, token bucket measured 2,562 completed responses (0 failures, 268.02 req/s, p95 80 ms) and sliding window 1,891 (0 failures, 195.22 req/s, p95 120 ms). Local measurements are not AWS capacity evidence.
+- TLS syntax and local redirect/HTTPS/HSTS behavior passed using a temporary self-signed certificate. A trusted public certificate, automated renewal and renewal recovery have not been verified.
+- Admin access remains a single shared token with no users, roles, rotation UI, or audit identity. Backups and restore drills, multi-host HA, autoscaling, distributed rate-limit consistency, automated alerting, resource limits, and capacity testing at the intended AWS size remain outstanding.
+- Redis metrics/history/outbox are local persistent state, not an external audit log. The single EC2/volume design has a single failure domain. Failed publisher events are observable but currently require operator-level Redis inspection/replay procedures.
+
+## AWS readiness decision
+
+**Not production ready / do not expose publicly yet.** The requested local hardening paths have been exercised, including browser flows, expiry/recovery, publisher tests, and matched algorithm benchmarks. Public certificate lifecycle, AWS networking and sizing, backup/restore, HA, and operational recovery remain unverified or incomplete. No AWS resources were provisioned and no cloud costs were incurred.

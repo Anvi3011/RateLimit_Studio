@@ -1,0 +1,1 @@
+{"name":"ratelimit-studio","version":"1.0.0","private":true,"type":"module","scripts":{"build":"vite build","dev":"vite --host 0.0.0.0","test:e2e":"playwright test"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","react":"latest","react-dom":"latest","lucide-react":"latest"},"devDependencies":{"@playwright/test":"1.56.1"}}
