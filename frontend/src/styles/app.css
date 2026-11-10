@@ -3,3 +3,67 @@
 @media(max-width:900px){.app{grid-template-columns:190px 1fr}main{padding:22px 20px}.metrics{grid-template-columns:repeat(2,1fr)}.architecture{gap:6px}.node{width:120px}.arrow{font-size:16px}}@media(max-width:640px){.app{display:block}aside{min-height:unset;padding:12px;display:flex;flex-direction:row;overflow:auto;align-items:center;gap:5px;border-right:0;border-bottom:1px solid #322d39}.brand{padding:0 8px;min-width:145px}.brand small,.navlabel,.sidebottom{display:none}.nav{padding:9px;white-space:nowrap;font-size:11px}.nav svg{display:none}main{padding:18px 13px}.intro{align-items:start;gap:12px;flex-direction:column}.buttons{width:100%}.buttons button{flex:1;justify-content:center}.grid.two,.info{grid-template-columns:1fr}.headright .pill{font-size:0}.architecture{padding-bottom:26px}.supports{position:static;transform:none;flex-basis:100%;justify-content:center;flex-wrap:wrap}.fields{grid-template-columns:1fr}.metrics{gap:7px}.metric{padding:11px;min-height:85px}.metric strong{font-size:19px}header small{font-size:8px}}
 
 .chartpanel{margin-top:14px}.chart{width:100%;overflow:hidden}.chart svg{display:block;width:100%;min-height:150px}.chartlegend{display:flex;gap:18px;align-items:center;flex-wrap:wrap;padding:8px 10px 0;color:#a39ba8;font:10px "DM Mono",monospace}.chartlegend span{display:flex;align-items:center;gap:6px}.chartlegend i{width:8px;height:8px;border-radius:50%;display:inline-block}.chartsource{margin-left:auto;color:#78717f}
+
+/* =========================================================
+   RateLimit Studio Navigation & Authentication Improvements
+   ========================================================= */
+
+/* Info Icon Button & Tooltips */
+.info-btn{background:transparent;border:0;color:#9b8ea8;cursor:pointer;padding:2px 4px;margin-left:6px;display:inline-flex;align-items:center;vertical-align:middle;border-radius:4px;transition:color .15s,background .15s}
+.info-btn:hover{color:#dfd0ee;background:#2a2333}
+
+/* Modal Backdrop & Containers */
+.modal-backdrop{position:fixed;inset:0;background:rgba(8,8,12,0.78);backdrop-filter:blur(3px);display:grid;place-items:center;z-index:1000;padding:16px;animation:fadeIn .2s ease}
+.modal-box{background:#18171e;border:1px solid #4a3d58;box-shadow:0 12px 35px rgba(0,0,0,0.65),0 0 15px rgba(168,85,247,0.12);border-radius:10px;padding:24px;width:100%;max-width:480px;position:relative;animation:slideUp .22s cubic-bezier(0.16,1,0.3,1)}
+.modal-box.wide{max-width:580px}
+.modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;border-bottom:1px solid #332c3a;padding-bottom:12px}
+.modal-header h3{margin:0;font-size:16px;color:#efe9f5;display:flex;align-items:center;gap:9px}
+.modal-close{background:transparent;border:0;color:#998e9f;cursor:pointer;padding:4px;border-radius:4px;display:grid;place-items:center}
+.modal-close:hover{color:#fff;background:#2a2632}
+.modal-body{font-size:13px;line-height:1.65;color:#c7bed0;margin:0 0 20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end}
+
+/* Floating Help Button */
+.floating-help-btn{position:fixed;bottom:24px;right:24px;z-index:900;background:#241d2d;color:#d8c6eb;border:1px solid #6b4d82;border-radius:30px;padding:10px 16px;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;box-shadow:0 6px 20px rgba(0,0,0,0.5),0 0 12px rgba(168,85,247,0.25);cursor:pointer;transition:transform .15s,background .15s,box-shadow .15s}
+.floating-help-btn:hover{background:#322740;color:#fff;transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,0.6),0 0 16px rgba(168,85,247,0.4)}
+
+/* Help Menu List */
+.help-list{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+.help-item{background:#201e26;border:1px solid #393242;border-radius:7px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;color:#ddd6e5;font-size:13px;cursor:pointer;text-align:left;transition:background .15s,border-color .15s,transform .12s}
+.help-item:hover{background:#2d2637;border-color:#745391;color:#fff;transform:translateX(3px)}
+.help-item small{color:#938a9b;font-size:11px;display:block;margin-top:3px}
+.help-tour-btn{background:#30223d;border-color:#785497;color:#e8daf5;font-weight:600}
+.help-tour-btn:hover{background:#3f2a52;border-color:#996cc0}
+
+/* Guided Tour Styles */
+.tour-welcome{border-top:3px solid #9d71c4}
+.tour-welcome p{font-size:13.5px;color:#c9c0d3;line-height:1.6}
+.tour-welcome .eyebrow{margin-bottom:6px}
+.tour-banner{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:950;background:#1b1923;border:1px solid #6c4b87;box-shadow:0 14px 40px rgba(0,0,0,0.7),0 0 20px rgba(168,85,247,0.3);border-radius:10px;padding:18px 22px;width:90%;max-width:580px;animation:slideUp .25s ease}
+.tour-banner-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.tour-banner-badge{font:10px 'DM Mono',monospace;color:#cfb5e6;letter-spacing:1px;background:#2b2036;padding:3px 8px;border-radius:4px;border:1px solid #573e6d}
+.tour-banner h4{margin:0;font-size:16px;color:#f3eef8}
+.tour-banner p{font-size:12.5px;color:#b8adc4;line-height:1.55;margin:6px 0 15px}
+.tour-banner-footer{display:flex;align-items:center;justify-content:space-between}
+.tour-dots{display:flex;gap:6px}
+.tour-dot{width:7px;height:7px;border-radius:50%;background:#383242;transition:background .2s}
+.tour-dot.active{background:#b898d0;box-shadow:0 0 6px #b898d0}
+.tour-btn-group{display:flex;gap:8px}
+
+/* Admin Token Input & Authentication Status */
+.token-input-wrapper{position:relative;display:flex;align-items:center;width:100%}
+.token-input-wrapper input{width:100%;padding-right:38px}
+.token-toggle-btn{position:absolute;right:8px;background:transparent;border:0;color:#9b92a4;cursor:pointer;padding:4px;border-radius:4px;display:grid;place-items:center}
+.token-toggle-btn:hover{color:#e6ddf1}
+.auth-status-bar{display:flex;align-items:center;gap:10px;margin-top:7px;flex-wrap:wrap}
+.auth-badge{font-size:11px;font-weight:500;padding:4px 9px;border-radius:20px;display:inline-flex;align-items:center;gap:5px}
+.auth-badge.authenticated{background:#173426;color:#78dfa9;border:1px solid #285e43}
+.auth-badge.unverified{background:#2c261e;color:#dec379;border:1px solid #54442a}
+.auth-badge.invalid{background:#381d22;color:#f18688;border:1px solid #6b2b34}
+.auth-badge.throttled{background:#3a1820;color:#f37d7f;border:1px solid #752934}
+.auth-actions{display:inline-flex;align-items:center;gap:8px}
+.auth-actions button{font-size:11px;padding:4px 8px}
+
+/* Subtle Animations */
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}

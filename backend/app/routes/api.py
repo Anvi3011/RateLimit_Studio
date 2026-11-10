@@ -19,22 +19,74 @@ def config_value():
     except Exception: return POLICY_CACHE.copy()
     POLICY_CACHE=json.loads(raw) if raw else DEFAULT.copy()
     return POLICY_CACHE.copy()
+def get_expected_admin_token():
+    expected = current_app.config.get('ADMIN_TOKEN') or os.getenv('ADMIN_TOKEN') or os.getenv('ADMIN_SECRET') or os.getenv('ADMIN_KEY') or os.getenv('ADMIN_PASSWORD') or ''
+    if isinstance(expected, str):
+        return expected.strip().strip('"\'')
+    return str(expected)
+
+def get_supplied_admin_token():
+    supplied = request.headers.get('X-Admin-Token', '')
+    if not supplied and 'Authorization' in request.headers:
+        auth = request.headers.get('Authorization', '').strip()
+        if auth.lower().startswith('bearer '):
+            supplied = auth[7:].strip()
+        else:
+            supplied = auth
+    if not supplied and request.is_json:
+        try:
+            body = request.get_json(silent=True) or {}
+            if isinstance(body, dict) and 'admin_token' in body:
+                supplied = str(body.get('admin_token', '')).strip()
+        except Exception:
+            pass
+    if isinstance(supplied, str):
+        return supplied.strip().strip('"\'')
+    return str(supplied)
+
 def admin():
-    expected=current_app.config['ADMIN_TOKEN']; supplied=request.headers.get('X-Admin-Token','')
-    if not expected or expected=='change-me-before-use': return False
+    expected = get_expected_admin_token()
+    supplied = get_supplied_admin_token()
+    if not expected or expected == 'change-me-before-use':
+        return False
+    if not supplied:
+        return False
     try:
-        key='ratelimit:admin:attempts:'+hashlib.sha256((request.remote_addr or 'unknown').encode()).hexdigest(); r=store(); count=int(r.get(key) or 0)
-        if count>=5: return False
-        if hmac.compare_digest(supplied,expected): r.delete(key); return True
-        p=r.pipeline(); p.incr(key); p.expire(key,60); p.execute()
-    except Exception: return False
+        remote = request.remote_addr or 'unknown'
+        key = 'ratelimit:admin:attempts:' + hashlib.sha256(remote.encode()).hexdigest()
+        r = store()
+        count = int(r.get(key) or 0)
+        if count >= 5:
+            return False
+        if hmac.compare_digest(supplied, expected):
+            r.delete(key)
+            return True
+        p = r.pipeline()
+        p.incr(key)
+        p.expire(key, 60)
+        p.execute()
+    except Exception as exc:
+        log.warning('admin auth check exception: %s', type(exc).__name__)
+        if hmac.compare_digest(supplied, expected):
+            return True
+        return False
     return False
+
 def auth_failure():
+    expected = get_expected_admin_token()
+    if not expected or expected == 'change-me-before-use':
+        return jsonify(error='admin_secret_not_configured', detail='Admin secret is not configured on the backend server'), 500
     try:
-        key='ratelimit:admin:attempts:'+hashlib.sha256((request.remote_addr or 'unknown').encode()).hexdigest()
-        if int(store().get(key) or 0)>=5: return jsonify(error='admin_auth_throttled',retry_after=60),429,{'Retry-After':'60'}
-    except Exception: pass
-    return jsonify(error='admin_auth_required'),401
+        remote = request.remote_addr or 'unknown'
+        key = 'ratelimit:admin:attempts:' + hashlib.sha256(remote.encode()).hexdigest()
+        if int(store().get(key) or 0) >= 5:
+            return jsonify(error='admin_auth_throttled', detail='Too many authentication attempts. Please retry after 60 seconds.', retry_after=60), 429, {'Retry-After': '60'}
+    except Exception:
+        pass
+    supplied = get_supplied_admin_token()
+    if not supplied:
+        return jsonify(error='admin_auth_required', detail='Admin authentication credentials required'), 401
+    return jsonify(error='admin_auth_invalid', detail='Invalid admin credentials provided'), 401
 def active_faults():
     active={}
     try:
@@ -54,8 +106,10 @@ def enqueue_event(event):
     return bool(store().eval("local n=redis.call('LLEN',KEYS[1]); if n>=tonumber(ARGV[1]) then return 0 end; redis.call('RPUSH',KEYS[1],ARGV[2]); return n+1",1,OUTBOX_KEY,OUTBOX_CAPACITY,payload))
 def validate_config(d):
     if not isinstance(d,dict): raise ValueError('JSON object required')
-    if 'algorithm' in d and d['algorithm'] not in ('token_bucket','sliding_window'): raise ValueError('algorithm must be token_bucket or sliding_window')
-    c={**config_value(),**d}
+    d_clean = {k: v for k, v in d.items() if k != 'admin_token'}
+    if 'algorithm' in d_clean and d_clean['algorithm'] not in ('token_bucket','sliding_window'): raise ValueError('algorithm must be token_bucket or sliding_window')
+    c={**config_value(),**d_clean}
+    c.pop('admin_token', None)
     if c.get('algorithm') not in ('token_bucket','sliding_window'): raise ValueError('algorithm must be token_bucket or sliding_window')
     for k,lo,hi in [('rate',1,100000),('burst',1,100000),('window_seconds',1,3600),('edge_nodes',1,100)]:
         try: c[k]=int(c[k])
@@ -82,6 +136,11 @@ def health():
     except Exception: pass
     result['healthy']=all(result[name]=='healthy' for name in ('api','redis','rabbitmq','worker','publisher'))
     return jsonify(result),200 if result['healthy'] else 503
+
+@api.route('/auth/verify', methods=['GET', 'POST'])
+def verify_admin():
+    if not admin(): return auth_failure()
+    return jsonify(authenticated=True, message='Admin authentication verified'), 200
 
 @api.get('/config')
 def get_config():

@@ -20,7 +20,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://${RABBITMQ_USER:?Set RABBITMQ_USER in .env}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/%2F
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env before starting the application}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-${ADMIN_SECRET:-${ADMIN_KEY:-${ADMIN_PASSWORD:-}}}}
       FAULTS_ENABLED: ${FAULTS_ENABLED:-false}
       RATE_LIMIT_FAIL_MODE: ${RATE_LIMIT_FAIL_MODE:-closed}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost}
@@ -91,7 +91,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.e2e
     environment:
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env before starting the application}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-${ADMIN_SECRET:-${ADMIN_KEY:-${ADMIN_PASSWORD:-}}}}
       PLAYWRIGHT_BASE_URL: http://nginx
     volumes: ["./frontend/test-results:/work/test-results"]
     depends_on: [backend, frontend, nginx]

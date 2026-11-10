@@ -60,6 +60,12 @@ playwright/.cache/
 *.log
 *.pid
 
+# OS and editor files.
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
 # Local measured reports, backups, temporary release worktrees, and certs.
 benchmarks/reports/*
 !benchmarks/reports/.gitkeep

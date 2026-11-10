@@ -6,7 +6,18 @@ from .routes.api import api
 
 def create_app(test_config=None):
     app = Flask(__name__)
-    app.config.update(MAX_CONTENT_LENGTH=64 * 1024, ADMIN_TOKEN=os.getenv('ADMIN_TOKEN', 'change-me-before-use'),
+    admin_token = (
+        os.getenv('ADMIN_TOKEN') or 
+        os.getenv('ADMIN_SECRET') or 
+        os.getenv('ADMIN_KEY') or 
+        os.getenv('ADMIN_PASSWORD') or 
+        os.getenv('ADMIN_AUTH_TOKEN') or 
+        'change-me-before-use'
+    )
+    if isinstance(admin_token, str):
+        admin_token = admin_token.strip().strip('"\'')
+    app.config.update(MAX_CONTENT_LENGTH=64 * 1024,
+                      ADMIN_TOKEN=admin_token,
                       FAULTS_ENABLED=os.getenv('FAULTS_ENABLED', 'false').lower() == 'true',
                       REDIS_URL=os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
                       RABBITMQ_URL=os.getenv('RABBITMQ_URL', 'amqp://localhost:5672/%2F'),
