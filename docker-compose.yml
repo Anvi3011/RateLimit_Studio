@@ -11,7 +11,7 @@ services:
     restart: unless-stopped
   redis:
     image: redis:7.4-alpine
-    command: ["redis-server","--appendonly","yes"]
+    command: ["redis-server","--appendonly","yes","--maxmemory","256mb","--maxmemory-policy","noeviction"]
     volumes: [redis_data:/data]
     networks: [internal]
     healthcheck: {test: ["CMD","redis-cli","ping"], interval: 5s, timeout: 3s, retries: 10}
@@ -37,13 +37,14 @@ services:
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost}
       OUTBOX_CAPACITY: ${OUTBOX_CAPACITY:-5000}
       LOG_RETENTION_HOURS: ${LOG_RETENTION_HOURS:-24}
+      NUM_PROXIES: ${NUM_PROXIES:-2}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
       publisher: {condition: service_started}
     networks: [internal]
-    healthcheck: {test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health',timeout=2)"], interval: 15s, timeout: 4s, retries: 5}
+    healthcheck: {test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health',timeout=2)"], interval: 15s, timeout: 4s, retries: 5, start_period: 30s}
     restart: unless-stopped
   worker:
     build: ./worker
