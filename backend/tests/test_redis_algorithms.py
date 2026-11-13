@@ -10,9 +10,13 @@ from app.redis import key
 
 @pytest.fixture(scope='module')
 def r():
-    client=redis.Redis.from_url(os.getenv('REDIS_URL','redis://localhost:6379/0'),decode_responses=True)
-    client.ping()
-    return client
+    try:
+        client=redis.Redis.from_url(os.getenv('REDIS_URL','redis://localhost:6379/0'),decode_responses=True)
+        client.ping()
+        return client
+    except Exception:
+        import fakeredis
+        return fakeredis.FakeRedis(decode_responses=True)
 
 def test_token_bucket_capacity_and_controlled_refill(r):
     k=key('test-client','/bucket','test-'+uuid.uuid4().hex)

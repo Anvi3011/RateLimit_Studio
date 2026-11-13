@@ -14,7 +14,7 @@ The backend suite covers the existing rate-limit and API regressions plus Redis-
 
 ## Browser-driven tests
 
-Start a private local stack with `FAULTS_ENABLED=true` only for this isolated test run. Use a valid local `.env` admin token, then:
+Start a private local stack with `FAULTS_ENABLED=true` only for this isolated test run:
 
 ```powershell
 # In .env for this isolated local stack, temporarily set FAULTS_ENABLED=true.
@@ -25,7 +25,7 @@ $env:FAULTS_ENABLED = 'false'
 docker compose up -d backend
 ```
 
-The optional `e2e` profile supplies Chromium and Playwright; it reads `ADMIN_TOKEN` from `.env` and saves failure artifacts under `frontend/test-results/`. For host-driven execution instead, run `npm install`, `npx playwright install chromium`, set `ADMIN_TOKEN` and `PLAYWRIGHT_BASE_URL`, and run `npm run test:e2e` inside `frontend/`.
+The optional `e2e` profile supplies Chromium and Playwright; it saves failure artifacts under `frontend/test-results/`. For host-driven execution instead, run `npm install`, `npx playwright install chromium`, set `PLAYWRIGHT_BASE_URL`, and run `npm run test:e2e` inside `frontend/`. No admin token is required.
 
 The Playwright flow edits and applies a policy, verifies dashboard refresh and reload persistence, generates traffic, inspects actual decision rows, toggles/restores a fault, and checks a real proxy timeout followed by automatic expiry and recovery. It restores the original policy and previously active fault names. Do not point it at production or a shared Redis database.
 

@@ -1,4 +1,14 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ratelimit_studio}
+      POSTGRES_USER: ${POSTGRES_USER:-ratelimit_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [internal]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ratelimit_user} -d ${POSTGRES_DB:-ratelimit_studio}"], interval: 10s, timeout: 5s, retries: 5}
+    restart: unless-stopped
   redis:
     image: redis:7.4-alpine
     command: ["redis-server","--appendonly","yes"]
@@ -18,14 +28,17 @@ services:
   backend:
     build: ./backend
     environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ratelimit_user}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-ratelimit_studio}
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://${RABBITMQ_USER:?Set RABBITMQ_USER in .env}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/%2F
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-${ADMIN_SECRET:-${ADMIN_KEY:-${ADMIN_PASSWORD:-}}}}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
       FAULTS_ENABLED: ${FAULTS_ENABLED:-false}
       RATE_LIMIT_FAIL_MODE: ${RATE_LIMIT_FAIL_MODE:-closed}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost}
       OUTBOX_CAPACITY: ${OUTBOX_CAPACITY:-5000}
+      LOG_RETENTION_HOURS: ${LOG_RETENTION_HOURS:-24}
     depends_on:
+      postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
       publisher: {condition: service_started}
@@ -35,9 +48,11 @@ services:
   worker:
     build: ./worker
     environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ratelimit_user}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-ratelimit_studio}
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://${RABBITMQ_USER:?Set RABBITMQ_USER in .env}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/%2F
     depends_on:
+      postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
     networks: [internal]
@@ -91,7 +106,6 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.e2e
     environment:
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-${ADMIN_SECRET:-${ADMIN_KEY:-${ADMIN_PASSWORD:-}}}}
       PLAYWRIGHT_BASE_URL: http://nginx
     volumes: ["./frontend/test-results:/work/test-results"]
     depends_on: [backend, frontend, nginx]
@@ -103,5 +117,6 @@ networks:
     driver: bridge
 
 volumes:
+  postgres_data:
   redis_data:
   rabbitmq_data:

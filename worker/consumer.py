@@ -2,6 +2,12 @@ import json, os, signal, time
 import pika
 import redis
 from processor import process
+from db import init_db
+
+try:
+    init_db()
+except Exception as e:
+    print(f'DB init warning: {e}', flush=True)
 
 stopping=False
 def stop(*_):
