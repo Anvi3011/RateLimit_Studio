@@ -1,20 +1,17 @@
 """Run a matched short local comparison; writes measured results only."""
-import csv, json, pathlib, re, subprocess, urllib.request, urllib.parse, time
+import csv, http.cookiejar, json, pathlib, re, subprocess, urllib.request, urllib.parse, time
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 REPORTS=ROOT/'benchmarks'/'reports'
 BASE='http://localhost:8080'
 
-def read_admin_token():
-    for line in (ROOT/'.env').read_text(encoding='utf-8').splitlines():
-        if line.startswith('ADMIN_TOKEN='): return line.partition('=')[2]
-    raise RuntimeError('ADMIN_TOKEN missing from .env')
+_cookie_jar = http.cookiejar.CookieJar()
+_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_cookie_jar))
 
-TOKEN=read_admin_token()
 def api(path,method='GET',body=None):
     data=None if body is None else json.dumps(body).encode()
-    request=urllib.request.Request(BASE+path,data=data,method=method,headers={'Content-Type':'application/json','X-Admin-Token':TOKEN})
-    with urllib.request.urlopen(request,timeout=10) as response: return json.loads(response.read())
+    request=urllib.request.Request(BASE+path,data=data,method=method,headers={'Content-Type':'application/json'})
+    with _opener.open(request,timeout=10) as response: return json.loads(response.read())
 
 def parse_locust_output(output):
     output=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',output)

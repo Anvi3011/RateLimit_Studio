@@ -2,7 +2,9 @@
 
 ## Implemented and locally verified in this hardening pass
 
-- Browser end-to-end coverage is defined with Playwright for policy edits/apply/refresh/reload, traffic generation, Traffic Inspector, fault controls, real reverse-proxy timeout, expiry, and recovery. It requires a running Compose stack, `FAULTS_ENABLED=true`, `ADMIN_TOKEN`, and Chromium.
+- Browser end-to-end coverage is defined with Playwright for policy edits/apply/refresh/reload, traffic generation, Traffic Inspector, Logs & Analytics, fault controls, real reverse-proxy timeout, expiry, and recovery. It requires a running Compose stack, `FAULTS_ENABLED=true`, and Chromium.
+- Persistent PostgreSQL relational database storage is introduced for detailed structured request logging, configuration audit histories, fault injection records, and system events. Logs are queried through a rich Logs & Analytics dashboard with summary cards, filters, request inspection modals, and formula-injection-safe CSV export.
+- Public access replaces the legacy admin token requirement: each visitor automatically receives a secure, signed demo session ID. Policies, metrics, logs, and fault simulations are isolated per demo session. Visitors cannot execute administrative shell commands, access Docker, or manipulate internal database connections.
 - Network timeout injection holds a real HTTP request for six seconds, beyond the frontend Nginx three-second upstream read timeout. The UI therefore receives an upstream timeout response. The Redis fault key expires automatically; all temporary faults accept a bounded 1–300 second TTL (default 60) and can also be reset immediately.
 - Metrics charts read an API time series derived from actual Redis decision samples. Samples are capped at 10,000 and one hour; empty buckets are zero, and the UI labels the data source. No sample data is fabricated.
 - Invalid admin tokens are throttled by a Redis counter keyed by a hash of the trusted client address: five failures per 60-second window returns HTTP 429 with `Retry-After`. Nginx adds a second rate limit to sensitive routes. Backend tests cover the auth throttle.

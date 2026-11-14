@@ -26,7 +26,7 @@ Compose publishes only Nginx: the default `nginx` service maps host `HTTP_PORT` 
 
 Nginx is the only public application entry point. On a single instance public IP, users browse `http://PUBLIC_IP/` for an academic HTTP demo, or `https://DOMAIN/` when using a trusted domain certificate. Users do not need local Python, Node, Docker, Redis, or RabbitMQ. The EC2 instance and its Docker containers must remain running for remote access. A stopped/terminated instance or expired public address breaks the URL.
 
-Application configuration writes, fault changes, benchmark runs, and metric reset require the `X-Admin-Token` (`ADMIN_TOKEN`) and are throttled. The dashboard's simulated request/traffic-generation APIs are intentionally available to the browser and should be treated as public demo endpoints; do not use this unauthenticated demo service for sensitive data or unrestricted production workloads. Keep fault injection disabled.
+Application configuration writes, fault changes, benchmark runs, traffic generation, and logs analytics are completely public and isolated to each visitor's demo session. No admin token or credentials are required for demonstration features. Visitors cannot access infrastructure commands, containers, or internal databases. Keep fault injection disabled in production configurations.
 
 ## Security group
 
@@ -57,7 +57,7 @@ No reliable dollar estimate can be given without the selected region, instance, 
    ```
 
    It uses Docker's official Ubuntu package repository. Other OS images must follow the vendor and Docker installation instructions; the script deliberately rejects unsupported distributions.
-4. Create `.env` only if it does not already exist: `cp .env.example .env`; set `ADMIN_TOKEN` to at least 32 random characters, `RABBITMQ_PASSWORD` to at least 64 hexadecimal characters, `RABBITMQ_USER` to a unique user, `FAULTS_ENABLED=false`, `RATE_LIMIT_FAIL_MODE=closed`, and `HTTP_PORT=80`. Set `FRONTEND_ORIGIN` to `http://EC2_PUBLIC_IP` for the HTTP demo or `https://your.domain` for TLS. The deploy script sets mode 0600 and refuses placeholders, weak token/password values, loopback origins, fault injection, or the default 8080 port. Keep `.env` private and out of backups shared in public locations.
+4. Create `.env` only if it does not already exist: `cp .env.example .env`; set `POSTGRES_PASSWORD` to a secure password, `RABBITMQ_PASSWORD` to at least 64 hexadecimal characters, `RABBITMQ_USER` to a unique user, `POSTGRES_USER=ratelimit_user`, `POSTGRES_DB=ratelimit_studio`, `FAULTS_ENABLED=false`, `RATE_LIMIT_FAIL_MODE=closed`, and `HTTP_PORT=80`. Set `FRONTEND_ORIGIN` to `http://EC2_PUBLIC_IP` for the HTTP demo or `https://your.domain` for TLS. The deploy script sets mode 0600 and refuses placeholders, weak password values, loopback origins, or the default 8080 port. Keep `.env` private and out of backups shared in public locations.
 5. For public-IP HTTP demonstration, run `bash deployment/aws/deploy.sh http`. For trusted domain HTTPS, first point DNS at the instance and issue/install a real certificate as below, then run `HEALTHCHECK_URL=https://your.domain/api/health bash deployment/aws/deploy.sh tls`. The TLS deploy requires that HTTPS health URL and matching valid files. `TLS_CERT_DIR` defaults to `./deployment/tls`; the rollback script mounts the current certificate directory directly. Never use the self-signed smoke-test certificate for public users.
 6. Check `docker compose ps`, `bash deployment/aws/healthcheck.sh`, and `docker compose logs --tail=100 backend publisher worker nginx` (or `nginx-tls`). Visit the public URL from another laptop/network after the security group and host firewall are correct.
 
@@ -84,14 +84,15 @@ Replace every example domain and use a domain you control. For renewal, arrange 
 ## Update, backup, restore, rollback
 
 - Update code from a reviewed source revision, then run `bash deployment/aws/update.sh http` or `bash deployment/aws/update.sh tls`. This rebuilds images and reuses named data volumes. Review logs and run the health check after each update.
-- Make a consistent local archive with `sudo bash deployment/aws/backup.sh [destination-directory]`. The script briefly stops backend, publisher, worker, RabbitMQ, and Redis; archives both named volumes and `.env`; then restarts services. Store the archive with strict access and encryption. It contains credentials. Copy an encrypted backup off-instance and periodically test restoring into a separate, isolated EC2 host/project name. Never restore into the current project/volumes while preserving their data is required.
+- Make a consistent local archive with `sudo bash deployment/aws/backup.sh [destination-directory]`. The script briefly stops backend, publisher, worker, RabbitMQ, Redis, and PostgreSQL; archives all three named volumes (`postgres_data`, `redis_data`, `rabbitmq_data`) and `.env`; then restarts services. Store the archive with strict access and encryption. It contains credentials. Copy an encrypted backup off-instance and periodically test restoring into a separate, isolated EC2 host/project name. Never restore into the current project/volumes while preserving their data is required.
 - Restore into a fresh isolated host/project only. With the archive copied privately to that host, set a unique Compose project name so it creates new named volumes, restore `.env` securely, then:
 
 ```sh
 export COMPOSE_PROJECT_NAME=ratelimit-restore-test
 install -m 0600 /path/to/archive/env.backup .env
-docker compose create redis rabbitmq
+docker compose create postgres redis rabbitmq
 ARCHIVE_DIR=/path/to/archive
+docker compose run --rm --no-deps -v "$ARCHIVE_DIR:/backup:ro" --entrypoint sh postgres -c 'tar -xzf /backup/postgres_data.tgz -C /var/lib/postgresql/data'
 docker compose run --rm --no-deps -v "$ARCHIVE_DIR:/backup:ro" --entrypoint sh redis -c 'tar -xzf /backup/redis_data.tgz -C /data'
 docker compose run --rm --no-deps -v "$ARCHIVE_DIR:/backup:ro" --entrypoint sh rabbitmq -c 'tar -xzf /backup/rabbitmq_data.tgz -C /var/lib/rabbitmq'
 bash deployment/aws/deploy.sh http

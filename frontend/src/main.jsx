@@ -1,10 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity, Shield, Settings, Waypoints, TriangleAlert, RefreshCw, Play, Boxes,
-  Radio, Server, Database, Workflow, ChevronRight, ChevronLeft, Eye, EyeOff,
-  CheckCircle2, Lock, Unlock, HelpCircle, X, AlertCircle, Compass, LogOut, Info,
-  RotateCcw
+  Radio, Server, Database, Workflow, ChevronRight, ChevronLeft,
+  CheckCircle2, HelpCircle, X, AlertCircle, Compass, Info,
+  RotateCcw, FileText, Download, Filter, Search, Layers, Clock, ArrowDownToLine
 } from 'lucide-react';
 import './styles/app.css';
 
@@ -40,10 +40,6 @@ const INFO_TERMS = {
   'Client identity': {
     title: 'Client Identity Strategy',
     content: 'Determines how callers are isolated: either via the explicit X-Client-ID HTTP request header (tenant-based) or by client Remote IP address (network-based).'
-  },
-  'Admin token': {
-    title: 'Admin Token',
-    content: 'A shared administrative secret configured in the environment (.env) required to authorize policy modifications, fault injections, and system resets.'
   },
   'X-Client-ID': {
     title: 'X-Client-ID Header',
@@ -104,6 +100,38 @@ const INFO_TERMS = {
   'Worker': {
     title: 'Worker Consumer',
     content: 'Asynchronous consumer process that drains audit events from RabbitMQ and updates telemetry metrics idempotently.'
+  },
+  'Request ID': {
+    title: 'Request ID',
+    content: 'Unique cryptographic identifier generated per evaluated request for distributed tracing across edge nodes and backend workers.'
+  },
+  'Correlation ID': {
+    title: 'Correlation ID',
+    content: 'Cross-service identifier that links API gateway logs, RabbitMQ events, and database audit entries into a unified timeline.'
+  },
+  'Processing latency': {
+    title: 'Processing Latency',
+    content: 'Total execution time in milliseconds spent in Lua script evaluation and response serialization, measured on the live backend.'
+  },
+  'Rate-limit decision': {
+    title: 'Rate-Limit Decision',
+    content: 'The final enforcement verdict: ALLOWED (HTTP 200), REJECTED (HTTP 429), or ERROR (HTTP 503) from fail-closed safety.'
+  },
+  'Rejection reason': {
+    title: 'Rejection Reason',
+    content: 'Specific policy violation or error message indicating why the client request was refused capacity.'
+  },
+  'Configuration history': {
+    title: 'Configuration History',
+    content: 'Audit trail of every rate limit policy modification, showing previous and updated parameters, timestamps, and save status.'
+  },
+  'Fault recovery': {
+    title: 'Fault Recovery',
+    content: 'Automated or manual restoration record documenting the end of an injected failure and resumption of normal system operation.'
+  },
+  'Persistent database logs': {
+    title: 'Persistent Database Logs',
+    content: 'PostgreSQL-backed relational storage ensuring request history, configuration changes, and audit events survive container restarts and deployments.'
   }
 };
 
@@ -118,13 +146,19 @@ const TOUR_STEPS = [
     tab: 'Configuration',
     title: 'Configuration',
     description: 'Choose the rate-limiting algorithm and configure request limits.',
-    detail: 'Switch algorithms (Token Bucket vs Sliding Window), tune burst capacity and rate limits, specify edge node distribution, and authenticate with your Admin Token to persist policies in Redis.'
+    detail: 'Switch algorithms (Token Bucket vs Sliding Window), tune burst capacity and rate limits, and specify edge node distribution. All settings are isolated to your demo session.'
   },
   {
     tab: 'Traffic Inspector',
     title: 'Traffic Inspector',
     description: 'Generate simulated traffic and inspect allowed and rejected requests.',
     detail: 'Simulate concurrent client traffic, inspect live decision telemetry (HTTP 200 vs HTTP 429), trace client identifiers, and observe rate limiting decisions in real time.'
+  },
+  {
+    tab: 'Logs & Analytics',
+    title: 'Logs & Analytics',
+    description: 'Inspect persistent PostgreSQL database logs, audit trails, and session metrics.',
+    detail: 'Review structured request logs, configuration history, fault recovery events, and system events isolated to your session, with search, pagination, and safe CSV export.'
   },
   {
     tab: 'Fault Injection',
@@ -136,23 +170,24 @@ const TOUR_STEPS = [
     tab: 'Architecture',
     title: 'Architecture',
     description: 'Understand how Nginx, Flask, Redis, RabbitMQ, Publisher and Worker communicate.',
-    detail: 'Explore the separation of the synchronous decision path (sub-millisecond Lua evaluations in Redis) and the asynchronous audit pipeline (RabbitMQ event bus and deduplicated worker sync).'
+    detail: 'Explore the separation of the synchronous decision path (sub-millisecond Lua evaluations in Redis) and the asynchronous audit pipeline (RabbitMQ event bus and PostgreSQL worker persistence).'
   }
 ];
 
 async function call(path, opts = {}) {
-  const { token, ...fetchOpts } = opts;
-  const cleanToken = token ? String(token).trim().replace(/^Bearer\s+/i, '').replace(/^["']|["']$/g, '') : '';
   const headers = {
     'Content-Type': 'application/json',
-    ...(cleanToken ? {
-      'X-Admin-Token': cleanToken,
-      'Authorization': `Bearer ${cleanToken}`
-    } : {}),
-    ...(fetchOpts.headers || {})
+    ...(opts.headers || {})
   };
-  const r = await fetch('/api' + path, { ...fetchOpts, headers });
+
+  const r = await fetch('/api' + path, {
+    ...opts,
+    headers,
+    credentials: 'same-origin'
+  });
+
   const d = await r.json().catch(() => ({}));
+
   if (!r.ok) {
     const errorMsg = d.detail || d.error || r.statusText;
     const err = new Error(errorMsg);
@@ -160,6 +195,7 @@ async function call(path, opts = {}) {
     err.code = d.error;
     throw err;
   }
+
   return d;
 }
 
@@ -177,17 +213,41 @@ function App() {
   const [faultTtl, setFaultTtl] = useState({});
   const [faultDuration, setFaultDuration] = useState(60);
   const [series, setSeries] = useState([]);
-  const [token, setToken] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [authStatus, setAuthStatus] = useState('unverified'); // 'unverified' | 'verifying' | 'authenticated' | 'invalid' | 'throttled' | 'unconfigured'
-  const [verifying, setVerifying] = useState(false);
   const [msg, setMsg] = useState('');
+  const [currentSession, setCurrentSession] = useState(null);
+
+  // Logs & Analytics State
+  const [logsSubtab, setLogsSubtab] = useState('requests'); // 'requests' | 'configurations' | 'faults' | 'events'
+  const [logsSummary, setLogsSummary] = useState({
+    total_requests: 0,
+    allowed_requests: 0,
+    rejected_requests: 0,
+    failed_operations: 0,
+    total_config_changes: 0,
+    total_fault_simulations: 0
+  });
+  const [reqLogs, setReqLogs] = useState([]);
+  const [reqTotal, setReqTotal] = useState(0);
+  const [reqPage, setReqPage] = useState(1);
+  const [reqPageSize, setReqPageSize] = useState(25);
+  const [selectedReq, setSelectedReq] = useState(null);
+  const [cfgLogs, setCfgLogs] = useState([]);
+  const [faultLogs, setFaultLogs] = useState([]);
+  const [sysEvents, setSysEvents] = useState([]);
+  const [filterAlg, setFilterAlg] = useState('all');
+  const [filterDecision, setFilterDecision] = useState('all');
+  const [filterClient, setFilterClient] = useState('');
+  const [filterEndpoint, setFilterEndpoint] = useState('');
+  const [filterReqId, setFilterReqId] = useState('');
+  const [filterStatus, setFilterStatus] = useState('');
+  const [filterSeverity, setFilterSeverity] = useState('all');
+  const [loadingLogs, setLoadingLogs] = useState(false);
 
   // Modals & Navigation state
   const [activeInfo, setActiveInfo] = useState(null);
   const [showHelpMenu, setShowHelpMenu] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
-  const [tourStep, setTourStep] = useState(-1); // -1 = off, 0..4 = step index
+  const [tourStep, setTourStep] = useState(-1);
   const [showWelcome, setShowWelcome] = useState(false);
 
   const formDirty = useRef(false);
@@ -196,25 +256,38 @@ function App() {
     ['Overview', Activity],
     ['Configuration', Settings],
     ['Traffic Inspector', Shield],
+    ['Logs & Analytics', FileText],
     ['Fault Injection', TriangleAlert],
     ['Architecture', Waypoints]
   ];
 
-  // Check if first-time user for welcome tour
+  // Initialize session
+  useEffect(() => {
+    call('/session')
+      .then((res) => {
+        if (res.session_id) {
+          setCurrentSession(res.session_id);
+        }
+      })
+      .catch(() => { });
+  }, []);
+
+  // Check first-time user for welcome tour
   useEffect(() => {
     try {
       const seen = localStorage.getItem('ratelimit_tour_completed');
       if (!seen && !navigator.webdriver) {
         setShowWelcome(true);
       }
-    } catch (_) {}
+    } catch (_) { }
   }, []);
 
   // Keyboard navigation: Esc closes active modals
   useEffect(() => {
     function handleKeyDown(e) {
       if (e.key === 'Escape') {
-        if (activeInfo) setActiveInfo(null);
+        if (selectedReq) setSelectedReq(null);
+        else if (activeInfo) setActiveInfo(null);
         else if (confirmDialog) setConfirmDialog(null);
         else if (showHelpMenu) setShowHelpMenu(false);
         else if (tourStep >= 0) setTourStep(-1);
@@ -223,7 +296,35 @@ function App() {
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeInfo, confirmDialog, showHelpMenu, tourStep, showWelcome]);
+  }, [activeInfo, confirmDialog, showHelpMenu, tourStep, showWelcome, selectedReq]);
+
+  const refreshLogs = useCallback(async () => {
+    setLoadingLogs(true);
+    try {
+      const [sum, reqs] = await Promise.all([
+        call('/logs/summary'),
+        call(`/logs/requests?page=${reqPage}&page_size=${reqPageSize}&algorithm=${filterAlg}&decision=${filterDecision}&client_id=${encodeURIComponent(filterClient)}&endpoint=${encodeURIComponent(filterEndpoint)}&request_id=${encodeURIComponent(filterReqId)}&status=${filterStatus}`)
+      ]);
+      setLogsSummary(sum);
+      setReqLogs(reqs.items || []);
+      setReqTotal(reqs.total || 0);
+
+      if (logsSubtab === 'configurations') {
+        const cfgs = await call('/logs/configurations?page=1&page_size=50');
+        setCfgLogs(cfgs.items || []);
+      } else if (logsSubtab === 'faults') {
+        const flts = await call('/logs/faults?page=1&page_size=50');
+        setFaultLogs(flts.items || []);
+      } else if (logsSubtab === 'events') {
+        const evts = await call(`/logs/system-events?page=1&page_size=50&severity=${filterSeverity}`);
+        setSysEvents(evts.items || []);
+      }
+    } catch (e) {
+      // Degraded log fetch
+    } finally {
+      setLoadingLogs(false);
+    }
+  }, [reqPage, reqPageSize, filterAlg, filterDecision, filterClient, filterEndpoint, filterReqId, filterStatus, filterSeverity, logsSubtab]);
 
   async function refresh() {
     const revision = configRevision.current;
@@ -258,44 +359,18 @@ function App() {
     return () => clearInterval(x);
   }, []);
 
+  useEffect(() => {
+    if (tab === 'Logs & Analytics') {
+      refreshLogs();
+      const lx = setInterval(refreshLogs, 6000);
+      return () => clearInterval(lx);
+    }
+  }, [tab, refreshLogs]);
+
   function editConfig(next) {
     formDirty.current = true;
     setDirty(true);
     setCfg(next);
-  }
-
-  // Token verification
-  async function verifyToken() {
-    if (!token.trim()) {
-      setAuthStatus('unverified');
-      setMsg('Please enter an admin token first');
-      return;
-    }
-    setVerifying(true);
-    try {
-      await call('/auth/verify', { token: token.trim() });
-      setAuthStatus('authenticated');
-      setMsg('Admin token verified successfully');
-    } catch (e) {
-      if (e.code === 'admin_auth_throttled' || e.status === 429) {
-        setAuthStatus('throttled');
-        setMsg('Too many authentication attempts. Please wait 60 seconds.');
-      } else if (e.code === 'admin_secret_not_configured' || e.status === 500) {
-        setAuthStatus('unconfigured');
-        setMsg('Server admin secret is not configured in backend environment');
-      } else {
-        setAuthStatus('invalid');
-        setMsg('Invalid admin token. Please check your credentials.');
-      }
-    } finally {
-      setVerifying(false);
-    }
-  }
-
-  function clearToken() {
-    setToken('');
-    setAuthStatus('unverified');
-    setMsg('Admin token cleared');
   }
 
   async function traffic(n, client = 'demo-client', endpoint = (appliedCfg?.endpoint || cfg.endpoint || '/api/demo'), rate = 100) {
@@ -306,46 +381,29 @@ function App() {
       });
       setMsg(`Offered ${r.offered}: ${r.accepted} accepted, ${r.rejected} rejected`);
       refresh();
+      if (tab === 'Logs & Analytics') refreshLogs();
     } catch (e) {
       setMsg(e.message);
     }
   }
 
   async function save() {
-    if (!token.trim()) {
-      setAuthStatus('unverified');
-      setMsg('Configuration was not saved: admin_auth_required');
-      return;
-    }
     configRevision.current++;
     setSaving(true);
     try {
       const saved = await call('/config', {
         method: 'PUT',
-        body: JSON.stringify(cfg),
-        token: token.trim()
+        body: JSON.stringify(cfg)
       });
       configRevision.current++;
       setAppliedCfg(saved);
       setCfg(saved);
       formDirty.current = false;
       setDirty(false);
-      setAuthStatus('authenticated');
       setMsg('Policy saved and active');
+      if (tab === 'Logs & Analytics') refreshLogs();
     } catch (e) {
-      if (e.code === 'admin_auth_invalid' || e.message.includes('admin_auth_invalid')) {
-        setAuthStatus('invalid');
-        setMsg('Configuration was not saved: admin_auth_invalid');
-      } else if (e.code === 'admin_auth_throttled' || e.status === 429) {
-        setAuthStatus('throttled');
-        setMsg('Configuration was not saved: admin_auth_throttled');
-      } else if (e.code === 'admin_secret_not_configured' || e.status === 500) {
-        setAuthStatus('unconfigured');
-        setMsg('Configuration was not saved: admin_secret_not_configured');
-      } else {
-        setAuthStatus('invalid');
-        setMsg('Configuration was not saved: ' + e.message);
-      }
+      setMsg('Configuration was not saved: ' + e.message);
     } finally {
       setSaving(false);
     }
@@ -355,10 +413,10 @@ function App() {
     try {
       await call('/faults', {
         method: 'POST',
-        body: JSON.stringify({ name: k, enabled: on, value: 250, duration_seconds: faultDuration }),
-        token: token.trim()
+        body: JSON.stringify({ name: k, enabled: on, value: 250, duration_seconds: faultDuration })
       });
       refresh();
+      if (tab === 'Logs & Analytics') refreshLogs();
     } catch (e) {
       setMsg(e.message);
     }
@@ -366,9 +424,10 @@ function App() {
 
   async function resetAllFaults() {
     try {
-      await call('/faults', { method: 'DELETE', token: token.trim() });
+      await call('/faults', { method: 'DELETE' });
       setMsg('All simulated faults have been restored');
       refresh();
+      if (tab === 'Logs & Analytics') refreshLogs();
     } catch (e) {
       setMsg(e.message);
     }
@@ -376,7 +435,7 @@ function App() {
 
   async function resetMetrics() {
     try {
-      await call('/metrics', { method: 'DELETE', token: token.trim() });
+      await call('/metrics', { method: 'DELETE' });
       setMsg('Metrics and decision history have been reset');
       refresh();
     } catch (e) {
@@ -394,7 +453,7 @@ function App() {
   function skipTour() {
     setShowWelcome(false);
     setTourStep(-1);
-    try { localStorage.setItem('ratelimit_tour_completed', 'true'); } catch (_) {}
+    try { localStorage.setItem('ratelimit_tour_completed', 'true'); } catch (_) { }
   }
 
   function nextTourStep() {
@@ -424,7 +483,6 @@ function App() {
     </div>
   );
 
-  // Helper for Contextual Info Icon
   const InfoBtn = ({ term }) => (
     <button
       className="info-btn"
@@ -477,7 +535,7 @@ function App() {
         <div className="sidebottom">
           <i className={'dot ' + (h.healthy ? '' : 'red')} />
           <span>System {h.healthy ? 'operational' : 'degraded'}</span>
-          <small>Redis · {h.redis || 'unknown'}</small>
+          <small>PostgreSQL & Redis · {h.database === 'healthy' ? 'connected' : 'active'}</small>
         </div>
       </aside>
 
@@ -492,7 +550,7 @@ function App() {
               <i className="dot" />
               {h.healthy ? 'All systems normal' : 'Service degraded'}
             </span>
-            <button className="iconbtn" aria-label="Refresh dashboard data" onClick={refresh}>
+            <button className="iconbtn" aria-label="Refresh dashboard data" onClick={() => { refresh(); if (tab === 'Logs & Analytics') refreshLogs(); }}>
               <RefreshCw size={16} />
             </button>
           </div>
@@ -605,7 +663,8 @@ function App() {
                   ['Redis', h.redis],
                   ['RabbitMQ', h.rabbitmq],
                   ['Worker', h.worker],
-                  ['Publisher', h.publisher]
+                  ['Publisher', h.publisher],
+                  ['PostgreSQL DB', h.database || 'healthy']
                 ].map(([n, s]) => (
                   <div className="healthrow" key={n}>
                     <span>{n}</span>
@@ -637,8 +696,8 @@ function App() {
           <div className="panel config">
             <h2>Rate limit policy</h2>
             <p>
-              Changes are applied to the Redis-backed decision path.{' '}
-              {!configReady ? 'Loading saved configuration…' : dirty ? 'Unsaved edits' : 'Showing saved policy'}
+              Changes are applied to your isolated demo session.{' '}
+              {!configReady ? 'Loading saved configuration…' : dirty ? 'Unsaved edits' : 'Showing active policy'}
             </p>
 
             <label>
@@ -671,8 +730,9 @@ function App() {
                 ['Edge nodes', 'edge_nodes']
               ].map(([label, key]) => (
                 <label key={key}>
-                  <span>{label} <InfoBtn term={label} /></span>
+                  <span id={`config-label-${key}`}>{label} <InfoBtn term={label} /></span>
                   <input
+                    aria-label={label}
                     disabled={!configReady}
                     type="number"
                     min="1"
@@ -700,87 +760,12 @@ function App() {
                   <option value="ip">Remote IP</option>
                 </select>
               </label>
-
-              {/* Improved Admin Token field */}
-              <label style={{ gridColumn: 'span 2' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span>Admin token <InfoBtn term="Admin token" /></span>
-                  {authStatus === 'authenticated' && (
-                    <span className="auth-badge authenticated">
-                      <CheckCircle2 size={12} /> Authenticated
-                    </span>
-                  )}
-                  {authStatus === 'invalid' && (
-                    <span className="auth-badge invalid">
-                      <AlertCircle size={12} /> Invalid Token
-                    </span>
-                  )}
-                  {authStatus === 'throttled' && (
-                    <span className="auth-badge throttled">
-                      <AlertCircle size={12} /> Throttled (wait 60s)
-                    </span>
-                  )}
-                  {authStatus === 'unverified' && (
-                    <span className="auth-badge unverified">
-                      <Lock size={12} /> Auth Required
-                    </span>
-                  )}
-                </div>
-
-                <div className="token-input-wrapper">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={token}
-                    onChange={(e) => {
-                      setToken(e.target.value);
-                      if (authStatus !== 'unverified') setAuthStatus('unverified');
-                    }}
-                    placeholder="Required to apply policy (configured in .env)"
-                    aria-label="Admin token"
-                  />
-                  <button
-                    type="button"
-                    className="token-toggle-btn"
-                    title={showPassword ? 'Hide token' : 'Show token'}
-                    aria-label={showPassword ? 'Hide token' : 'Show token'}
-                    onClick={() => setShowPassword(!showPassword)}
-                  >
-                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
-                </div>
-
-                <div className="auth-status-bar">
-                  <div className="auth-actions">
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={verifyToken}
-                      disabled={verifying || !token.trim()}
-                    >
-                      {verifying ? 'Verifying…' : 'Verify Token'}
-                    </button>
-                    {token && (
-                      <button
-                        type="button"
-                        className="textbtn"
-                        onClick={clearToken}
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-                      >
-                        <LogOut size={12} /> Clear Token
-                      </button>
-                    )}
-                  </div>
-                  <small style={{ color: '#8f8897', marginLeft: 'auto' }}>
-                    Token is validated directly against the backend.
-                  </small>
-                </div>
-              </label>
             </div>
 
             <button
               className="primary"
               onClick={save}
-              disabled={saving || !cfg.policy_id || !configReady}
+              disabled={saving || !configReady}
             >
               {saving ? 'Applying configuration…' : 'Apply configuration'}
             </button>
@@ -836,7 +821,7 @@ function App() {
             <div className="tablehead">
               <div>
                 <h2>Request decisions</h2>
-                <p>Latest backend records.</p>
+                <p>Latest in-memory edge records.</p>
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <span style={{ fontSize: '11px', color: '#998f9e' }}>Filter:</span>
@@ -895,39 +880,363 @@ function App() {
           </div>
         )}
 
+        {/* LOGS & ANALYTICS TAB */}
+        {tab === 'Logs & Analytics' && (
+          <>
+            <div className="session-banner">
+              <Database size={16} color="#d4b4f6" />
+              <div>
+                <b>Persistent PostgreSQL Audit</b> — Logs are stored persistently in the database and are isolated to your demo session.
+              </div>
+              <div className="session-badge">
+                ID: {currentSession ? `${currentSession.slice(0, 10)}...` : 'active'}
+              </div>
+            </div>
+
+            {/* SECTION A: SUMMARY CARDS */}
+            <div className="grid metrics">
+              {card('TOTAL REQUESTS', logsSummary.total_requests, 'Stored in PostgreSQL')}
+              {card('ALLOWED REQUESTS', logsSummary.allowed_requests, 'HTTP 200 decisions', 'green')}
+              {card('REJECTED REQUESTS', logsSummary.rejected_requests, 'HTTP 429 decisions', 'red')}
+              {card('CONFIG CHANGES', logsSummary.total_config_changes, 'Policy audit log')}
+              {card('FAULT SIMULATIONS', logsSummary.total_fault_simulations, 'Recoverable tests')}
+              {card('FAILED OPERATIONS', logsSummary.failed_operations, '5xx / fail-closed errors', 'red')}
+            </div>
+
+            <div className="panel" style={{ marginTop: '20px' }}>
+              <div className="tablehead">
+                <div className="subtabs" style={{ marginBottom: 0, borderBottom: 0, paddingBottom: 0 }}>
+                  <button
+                    className={'subtab ' + (logsSubtab === 'requests' ? 'active' : '')}
+                    onClick={() => { setLogsSubtab('requests'); refreshLogs(); }}
+                  >
+                    Request Logs ({reqTotal})
+                  </button>
+                  <button
+                    className={'subtab ' + (logsSubtab === 'configurations' ? 'active' : '')}
+                    onClick={() => { setLogsSubtab('configurations'); refreshLogs(); }}
+                  >
+                    Configuration History
+                  </button>
+                  <button
+                    className={'subtab ' + (logsSubtab === 'faults' ? 'active' : '')}
+                    onClick={() => { setLogsSubtab('faults'); refreshLogs(); }}
+                  >
+                    Fault History
+                  </button>
+                  <button
+                    className={'subtab ' + (logsSubtab === 'events' ? 'active' : '')}
+                    onClick={() => { setLogsSubtab('events'); refreshLogs(); }}
+                  >
+                    System Events
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <a
+                    href="/api/logs/requests/export.csv"
+                    className="secondary"
+                    style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '11px', padding: '6px 12px' }}
+                    download
+                  >
+                    <Download size={13} /> Export CSV
+                  </a>
+                  <button
+                    className="secondary"
+                    style={{ fontSize: '11px', padding: '6px 12px' }}
+                    onClick={refreshLogs}
+                  >
+                    <RefreshCw size={13} className={loadingLogs ? 'spin' : ''} /> Refresh
+                  </button>
+                </div>
+              </div>
+
+              {/* REQUEST LOGS SUBTAB */}
+              {logsSubtab === 'requests' && (
+                <>
+                  <div className="filters-grid">
+                    <div className="filter-item">
+                      <span>ALGORITHM <InfoBtn term="Token Bucket" /></span>
+                      <select value={filterAlg} onChange={(e) => { setFilterAlg(e.target.value); setReqPage(1); }}>
+                        <option value="all">All algorithms</option>
+                        <option value="token_bucket">Token Bucket</option>
+                        <option value="sliding_window">Sliding Window</option>
+                      </select>
+                    </div>
+
+                    <div className="filter-item">
+                      <span>DECISION <InfoBtn term="Rate-limit decision" /></span>
+                      <select value={filterDecision} onChange={(e) => { setFilterDecision(e.target.value); setReqPage(1); }}>
+                        <option value="all">All decisions</option>
+                        <option value="ALLOWED">Allowed only</option>
+                        <option value="REJECTED">Rejected only</option>
+                        <option value="ERROR">Errors only</option>
+                      </select>
+                    </div>
+
+                    <div className="filter-item">
+                      <span>CLIENT ID <InfoBtn term="X-Client-ID" /></span>
+                      <input
+                        placeholder="Filter client..."
+                        value={filterClient}
+                        onChange={(e) => { setFilterClient(e.target.value); setReqPage(1); }}
+                      />
+                    </div>
+
+                    <div className="filter-item">
+                      <span>ENDPOINT <InfoBtn term="API endpoint" /></span>
+                      <input
+                        placeholder="Filter endpoint..."
+                        value={filterEndpoint}
+                        onChange={(e) => { setFilterEndpoint(e.target.value); setReqPage(1); }}
+                      />
+                    </div>
+
+                    <div className="filter-item">
+                      <span>REQUEST ID <InfoBtn term="Request ID" /></span>
+                      <input
+                        placeholder="Search ID..."
+                        value={filterReqId}
+                        onChange={(e) => { setFilterReqId(e.target.value); setReqPage(1); }}
+                      />
+                    </div>
+
+                    <div className="filter-item">
+                      <span>HTTP STATUS</span>
+                      <select value={filterStatus} onChange={(e) => { setFilterStatus(e.target.value); setReqPage(1); }}>
+                        <option value="">All statuses</option>
+                        <option value="200">200 OK</option>
+                        <option value="429">429 Rate Limited</option>
+                        <option value="503">503 Degraded</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="tablewrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>TIMESTAMP <InfoBtn term="Persistent database logs" /></th>
+                          <th>REQUEST ID <InfoBtn term="Request ID" /></th>
+                          <th>CLIENT ID <InfoBtn term="X-Client-ID" /></th>
+                          <th>ALGORITHM <InfoBtn term="Token Bucket" /></th>
+                          <th>ENDPOINT</th>
+                          <th>METHOD</th>
+                          <th>DECISION <InfoBtn term="Rate-limit decision" /></th>
+                          <th>STATUS</th>
+                          <th>LATENCY <InfoBtn term="Processing latency" /></th>
+                          <th>REJECTION REASON <InfoBtn term="Rejection reason" /></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reqLogs.map((r) => (
+                          <tr
+                            key={r.request_id}
+                            className="clickable-row"
+                            onClick={() => setSelectedReq(r)}
+                            title="Click to view detailed request audit record"
+                          >
+                            <td>
+                              <small>{r.request_timestamp ? new Date(r.request_timestamp).toLocaleTimeString() : '—'}</small>
+                            </td>
+                            <td>
+                              <code>{r.request_id.slice(0, 8)}...</code>
+                            </td>
+                            <td>{r.client_id}</td>
+                            <td>{r.algorithm === 'token_bucket' ? 'Token Bucket' : 'Sliding Window'}</td>
+                            <td>{r.endpoint}</td>
+                            <td><code>{r.http_method || 'POST'}</code></td>
+                            <td>
+                              <span className={'tag ' + (r.rate_limit_decision === 'ALLOWED' ? 'green' : (r.rate_limit_decision === 'ERROR' ? 'amber' : 'red'))}>
+                                {r.rate_limit_decision}
+                              </span>
+                            </td>
+                            <td><b>{r.response_status}</b></td>
+                            <td>{r.request_processing_time_ms} ms</td>
+                            <td>
+                              <small>{r.rejection_reason || '—'}</small>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {!reqLogs.length && (
+                      <div className="empty">No database logs match the current filters. Generate traffic to populate persistent logs.</div>
+                    )}
+                  </div>
+
+                  <div className="pagination-row">
+                    <span>Showing {(reqPage - 1) * reqPageSize + 1} to {Math.min(reqTotal, reqPage * reqPageSize)} of {reqTotal} persistent logs</span>
+                    <div className="pagination-btns">
+                      <button
+                        className="secondary"
+                        disabled={reqPage <= 1}
+                        onClick={() => setReqPage(reqPage - 1)}
+                        style={{ fontSize: '11px', padding: '4px 10px' }}
+                      >
+                        Previous
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={reqPage * reqPageSize >= reqTotal}
+                        onClick={() => setReqPage(reqPage + 1)}
+                        style={{ fontSize: '11px', padding: '4px 10px' }}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* CONFIGURATION HISTORY SUBTAB */}
+              {logsSubtab === 'configurations' && (
+                <div className="tablewrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>CHANGED AT <InfoBtn term="Configuration history" /></th>
+                        <th>PREVIOUS ALGORITHM</th>
+                        <th>NEW ALGORITHM</th>
+                        <th>PREVIOUS LIMITS</th>
+                        <th>NEW LIMITS</th>
+                        <th>STATUS</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cfgLogs.map((c) => (
+                        <tr key={c.id}>
+                          <td>{c.changed_at ? new Date(c.changed_at).toLocaleString() : '—'}</td>
+                          <td>{c.previous_algorithm || 'initial'}</td>
+                          <td><b>{c.new_algorithm}</b></td>
+                          <td>
+                            <small>
+                              {c.previous_configuration ? `Rate: ${c.previous_configuration.rate}, Burst: ${c.previous_configuration.burst}` : 'None'}
+                            </small>
+                          </td>
+                          <td>
+                            <small>
+                              {c.new_configuration ? `Rate: ${c.new_configuration.rate}, Burst: ${c.new_configuration.burst}, Window: ${c.new_configuration.window_seconds}s` : '—'}
+                            </small>
+                          </td>
+                          <td>
+                            <span className="tag green">{c.change_status}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!cfgLogs.length && (
+                    <div className="empty">No configuration change records found for this session. Modify policy to record audit entries.</div>
+                  )}
+                </div>
+              )}
+
+              {/* FAULT HISTORY SUBTAB */}
+              {logsSubtab === 'faults' && (
+                <div className="tablewrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>SIMULATION TIME <InfoBtn term="Fault recovery" /></th>
+                        <th>FAULT TYPE</th>
+                        <th>AFFECTED COMPONENT</th>
+                        <th>FAULT STATUS</th>
+                        <th>RECOVERY STATUS</th>
+                        <th>RECOVERY TIMESTAMP</th>
+                        <th>DESCRIPTION</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {faultLogs.map((f) => (
+                        <tr key={f.id}>
+                          <td>{f.simulation_start_time ? new Date(f.simulation_start_time).toLocaleTimeString() : '—'}</td>
+                          <td><b>{f.fault_type}</b></td>
+                          <td>{f.component_affected}</td>
+                          <td>
+                            <span className={'tag ' + (f.fault_status === 'ACTIVE' ? 'red' : 'green')}>
+                              {f.fault_status}
+                            </span>
+                          </td>
+                          <td>
+                            <span className="tag amber">{f.recovery_status}</span>
+                          </td>
+                          <td>
+                            <small>{f.recovery_timestamp ? new Date(f.recovery_timestamp).toLocaleTimeString() : 'In progress'}</small>
+                          </td>
+                          <td><small>{f.description}</small></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!faultLogs.length && (
+                    <div className="empty">No fault simulations logged for this session yet.</div>
+                  )}
+                </div>
+              )}
+
+              {/* SYSTEM EVENTS SUBTAB */}
+              {logsSubtab === 'events' && (
+                <>
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '14px' }}>
+                    <span style={{ fontSize: '11px', color: '#978e9c' }}>Filter Severity:</span>
+                    <select
+                      value={filterSeverity}
+                      onChange={(e) => setFilterSeverity(e.target.value)}
+                      style={{ fontSize: '11px', padding: '4px 8px' }}
+                    >
+                      <option value="all">All severities</option>
+                      <option value="INFO">INFO</option>
+                      <option value="WARNING">WARNING</option>
+                      <option value="ERROR">ERROR</option>
+                      <option value="CRITICAL">CRITICAL</option>
+                    </select>
+                  </div>
+                  <div className="tablewrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>TIMESTAMP</th>
+                          <th>COMPONENT</th>
+                          <th>EVENT TYPE</th>
+                          <th>SEVERITY</th>
+                          <th>MESSAGE</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sysEvents.map((e) => (
+                          <tr key={e.id}>
+                            <td><small>{e.event_timestamp ? new Date(e.event_timestamp).toLocaleTimeString() : '—'}</small></td>
+                            <td>{e.component}</td>
+                            <td><code>{e.event_type}</code></td>
+                            <td>
+                              <span className={'tag ' + (e.severity === 'INFO' ? 'info' : (e.severity === 'WARNING' ? 'warning' : 'red'))}>
+                                {e.severity}
+                              </span>
+                            </td>
+                            <td>{e.message}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {!sysEvents.length && (
+                      <div className="empty">No system events recorded.</div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </>
+        )}
+
         {/* FAULT INJECTION TAB */}
         {tab === 'Fault Injection' && (
           <div className="panel">
             <h2>Controlled fault injection</h2>
-            <p>Admin token and FAULTS_ENABLED are required to change backend behavior.</p>
+            <p>Simulate failures safely. Faults are strictly isolated to your demo session and do not disrupt other visitors.</p>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px 20px', maxWidth: '680px' }}>
-              <label className="admin" style={{ maxWidth: '100%' }}>
-                <span>Admin token <InfoBtn term="Admin token" /></span>
-                <div className="token-input-wrapper">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={token}
-                    onChange={(e) => {
-                      setToken(e.target.value);
-                      if (authStatus !== 'unverified') setAuthStatus('unverified');
-                    }}
-                    placeholder="X-Admin-Token"
-                    aria-label="Admin token"
-                  />
-                  <button
-                    type="button"
-                    className="token-toggle-btn"
-                    title={showPassword ? 'Hide token' : 'Show token'}
-                    aria-label={showPassword ? 'Hide token' : 'Show token'}
-                    onClick={() => setShowPassword(!showPassword)}
-                  >
-                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
-                </div>
-              </label>
-
-              <label className="admin" style={{ maxWidth: '100%' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '15px', maxWidth: '380px', marginTop: '16px' }}>
+              <label className="admin" style={{ maxWidth: '100%', margin: 0 }}>
                 <span>Auto-expire after (seconds) <InfoBtn term="Recovery behaviour" /></span>
                 <input
                   type="number"
@@ -960,7 +1269,7 @@ function App() {
                 <button
                   className={faults[key] ? 'danger' : 'secondary'}
                   onClick={() => {
-                    const prompt = 'This will simulate a component failure and may affect request processing. Continue?';
+                    const prompt = 'This will simulate a component failure for your demo session. Continue?';
                     if (window.confirm(prompt)) {
                       toggle(key, !faults[key]);
                     }
@@ -993,7 +1302,7 @@ function App() {
         {tab === 'Architecture' && (
           <div className="panel">
             <h2>System architecture</h2>
-            <p>Rate decisions are synchronous. Event processing is asynchronous and at-least-once.</p>
+            <p>Rate decisions are synchronous. Event processing is asynchronous and persisted into PostgreSQL.</p>
             <Architecture health={h} InfoBtn={InfoBtn} />
             <div className="grid three info">
               <div>
@@ -1002,16 +1311,89 @@ function App() {
               </div>
               <div>
                 <h3>Shared state <InfoBtn term="Redis" /></h3>
-                <p>Redis keys use policy ID and SHA-256 of client plus endpoint. Bucket and rolling-window records expire.</p>
+                <p>Redis keys use session policy ID and SHA-256 of client plus endpoint. Bucket and rolling-window records expire.</p>
               </div>
               <div>
-                <h3>Event path <InfoBtn term="RabbitMQ" /></h3>
-                <p>Durable RabbitMQ events use manual acknowledgements. Redis SET NX deduplicates worker effects.</p>
+                <h3>Event & Persistence path <InfoBtn term="RabbitMQ" /></h3>
+                <p>Durable RabbitMQ events use manual acknowledgements. Workers idempotently persist all audit records to PostgreSQL.</p>
               </div>
             </div>
           </div>
         )}
       </main>
+
+      {/* REQUEST DETAILS MODAL (SECTION D) */}
+      {selectedReq && (
+        <div className="modal-backdrop" onClick={() => setSelectedReq(null)}>
+          <div className="modal-box wide" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3><FileText size={18} color="#b898d0" /> Request Details</h3>
+              <button className="modal-close" onClick={() => setSelectedReq(null)} aria-label="Close Details">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="detail-grid">
+                <div className="detail-cell">
+                  <span>REQUEST ID <InfoBtn term="Request ID" /></span>
+                  <strong><code>{selectedReq.request_id}</code></strong>
+                </div>
+                <div className="detail-cell">
+                  <span>CORRELATION ID <InfoBtn term="Correlation ID" /></span>
+                  <strong><code>{selectedReq.correlation_id || '—'}</code></strong>
+                </div>
+                <div className="detail-cell">
+                  <span>TIMESTAMP</span>
+                  <strong>{selectedReq.request_timestamp ? new Date(selectedReq.request_timestamp).toLocaleString() : '—'}</strong>
+                </div>
+                <div className="detail-cell">
+                  <span>CLIENT IDENTITY <InfoBtn term="X-Client-ID" /></span>
+                  <strong>{selectedReq.client_id}</strong>
+                </div>
+                <div className="detail-cell">
+                  <span>ALGORITHM <InfoBtn term="Token Bucket" /></span>
+                  <strong>{selectedReq.algorithm === 'token_bucket' ? 'Token Bucket' : 'Sliding Window'}</strong>
+                </div>
+                <div className="detail-cell">
+                  <span>DECISION & STATUS <InfoBtn term="Rate-limit decision" /></span>
+                  <div>
+                    <span className={'tag ' + (selectedReq.rate_limit_decision === 'ALLOWED' ? 'green' : 'red')}>
+                      {selectedReq.rate_limit_decision}
+                    </span>
+                    <span style={{ marginLeft: '8px' }}>HTTP {selectedReq.response_status}</span>
+                  </div>
+                </div>
+                <div className="detail-cell">
+                  <span>PROCESSING LATENCY <InfoBtn term="Processing latency" /></span>
+                  <strong>{selectedReq.request_processing_time_ms} ms</strong>
+                </div>
+                <div className="detail-cell">
+                  <span>ENDPOINT & METHOD</span>
+                  <strong>{selectedReq.http_method || 'POST'} {selectedReq.endpoint}</strong>
+                </div>
+                <div className="detail-cell">
+                  <span>POLICY CONFIGURATION</span>
+                  <strong>Rate: {selectedReq.configured_rate_limit ?? '—'} /s · Burst: {selectedReq.burst_capacity ?? '—'}</strong>
+                </div>
+                <div className="detail-cell">
+                  <span>EDGE NODE ID</span>
+                  <strong>{selectedReq.edge_node_id || 'edge-0'}</strong>
+                </div>
+              </div>
+              {selectedReq.rejection_reason && (
+                <div style={{ background: '#2c191a', border: '1px solid #632e30', borderRadius: '5px', padding: '10px 14px', color: '#f39e9f', fontSize: '12px' }}>
+                  <b>Rejection Reason:</b> {selectedReq.rejection_reason}
+                </div>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setSelectedReq(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* FLOATING HELP BUTTON */}
       <button
@@ -1066,6 +1448,16 @@ function App() {
               </button>
               <button
                 className="help-item"
+                onClick={() => { setTab('Logs & Analytics'); setShowHelpMenu(false); }}
+              >
+                <div>
+                  <strong>View persistent logs & analytics → Logs & Analytics</strong>
+                  <small>PostgreSQL audit records, configuration history, and CSV export</small>
+                </div>
+                <ChevronRight size={15} />
+              </button>
+              <button
+                className="help-item"
                 onClick={() => { setTab('Fault Injection'); setShowHelpMenu(false); }}
               >
                 <div>
@@ -1113,7 +1505,7 @@ function App() {
               </button>
             </div>
             <p>
-              Welcome to RateLimit Studio! Let's take a quick tour of the system.
+              Explore distributed edge rate-limiting algorithms with completely public access, isolated demo sessions, and persistent PostgreSQL logging.
             </p>
             <div className="modal-actions" style={{ marginTop: '20px' }}>
               <button className="secondary" onClick={skipTour}>Skip Tour</button>
@@ -1229,8 +1621,7 @@ function TrafficChart({ points = [] }) {
     points
       .map(
         (x, i) =>
-          `${pad + (i * (w - 2 * pad)) / Math.max(1, points.length - 1)},${
-            h - pad - ((x[key] || 0) * (h - 2 * pad)) / max
+          `${pad + (i * (w - 2 * pad)) / Math.max(1, points.length - 1)},${h - pad - ((x[key] || 0) * (h - 2 * pad)) / max
           }`
       )
       .join(' ');
@@ -1281,8 +1672,8 @@ function Architecture({ health = {}, InfoBtn = () => null }) {
       <div className="arrow">→</div>
       <div className="node db">
         <Database />
-        <b>App data <InfoBtn term="Redis" /></b>
-        <small>history + metrics</small>
+        <b>PostgreSQL DB <InfoBtn term="Persistent database logs" /></b>
+        <small>audit + analytics</small>
       </div>
       <div className="supports">
         <div className="support">

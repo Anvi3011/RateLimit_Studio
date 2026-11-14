@@ -6,9 +6,10 @@ A browser-based educational studio for edge-based distributed rate limiting. It 
 
 - React and Vite dashboard, served by Nginx
 - Flask API with Gunicorn
-- Redis 7 for atomic Lua rate-limit decisions, persistent policy, history, metrics, and bounded outbox
+- PostgreSQL 16 for persistent relational request logging, configuration audit logs, fault histories, and system events
+- Redis 7 for atomic Lua rate-limit decisions, session-isolated policies, real-time metrics, and transactional outbox
 - RabbitMQ 4 for durable event delivery
-- Python worker and publisher/outbox relay
+- Python worker with PostgreSQL persistence and publisher/outbox relay
 - Nginx reverse proxy; optional TLS edge profile
 - Docker Compose for local and single-host deployment; Locust and Playwright for verification
 
@@ -21,17 +22,18 @@ flowchart LR
   F -->|/api| B[Flask API]
   B -->|atomic Lua decision| R[(Redis)]
   B -->|bounded outbox| R
+  B -->|sync config & fault logs| PG[(PostgreSQL)]
   P[Publisher relay] -->|confirmed durable publish| Q[(RabbitMQ)]
   R --> P
   Q --> W[Worker]
-  W --> R
+  W -->|idempotent audit persistence| PG
 ```
 
-The API decides synchronously against Redis. Events enter a bounded Redis outbox and are relayed to a durable RabbitMQ queue with publisher confirms and retry/recovery handling. The worker uses idempotency markers. Redis and RabbitMQ state persist in named Docker volumes. Only the Nginx edge publishes a host port; backend, frontend, Redis, RabbitMQ, publisher, and worker remain on private Compose networks.
+The API decides synchronously against Redis in sub-milliseconds. Decisions enter a bounded Redis outbox and are relayed to a durable RabbitMQ queue with publisher confirms. The worker consumes events and idempotently writes structured request logs to PostgreSQL. Redis, RabbitMQ, and PostgreSQL state persist across restarts in named Docker volumes. Visitors receive isolated demo sessions automatically with no admin login required.
 
 ## Local setup
 
-Install Docker Engine and the Docker Compose v2 plugin. Copy `.env.example` to `.env`, replace the placeholder `ADMIN_TOKEN`, `RABBITMQ_USER`, and `RABBITMQ_PASSWORD` with unique local values, and keep `FAULTS_ENABLED=false` except for an isolated fault-injection test. For a local demo keep `HTTP_PORT=8080` and `FRONTEND_ORIGIN=http://localhost:8080`.
+Install Docker Engine and the Docker Compose v2 plugin. Copy `.env.example` to `.env`, set secure values for `POSTGRES_PASSWORD`, `RABBITMQ_USER`, and `RABBITMQ_PASSWORD`, and keep `FAULTS_ENABLED=false` except for fault testing. For a local demo keep `HTTP_PORT=8080` and `FRONTEND_ORIGIN=http://localhost:8080`.
 
 ```sh
 cp .env.example .env

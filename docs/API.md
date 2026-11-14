@@ -1,25 +1,34 @@
 # API Reference
 
-All endpoints are under `/api`. JSON request bodies are limited to 64 KiB. Administrative operations require `X-Admin-Token`.
+All endpoints are under `/api`. JSON request bodies are limited to 64 KiB. All demonstration endpoints are completely public; operations and configurations are isolated per visitor using automatic, cryptographically signed demo sessions.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | API, Redis, RabbitMQ, worker and publisher health |
-| GET | `/metrics` | Observed totals, rates, latency percentiles, RabbitMQ depth and Redis outbox depth/inflight/failed/overflow, publish confirmations and retry counts |
+| GET | `/session` | Retrieve or create isolated demo session (`X-Demo-Session-ID`) |
+| GET | `/health` | API, Redis, RabbitMQ, PostgreSQL, worker, and publisher health |
+| GET | `/metrics` | Session-isolated observed totals, rates, latency percentiles, RabbitMQ depth, and outbox metrics |
 | GET | `/metrics/timeseries?seconds=300&bucket_seconds=5` | Bounded real decision samples aggregated into chart buckets |
-| DELETE | `/metrics` | Admin-only reset of metric/history samples (rate state remains) |
-| GET | `/history?page=1&page_size=50&decision=accepted&client_id=x&endpoint=/x&since=unix_timestamp` | Bounded filtered decisions |
-| GET | `/config` | Active policy |
-| PUT | `/config` | Admin-only policy update |
+| DELETE | `/metrics` | Reset session metrics and in-memory sample cache |
+| GET | `/history?page=1&page_size=50&decision=accepted` | Session in-memory decision history |
+| GET | `/config` | Session-isolated active policy |
+| PUT | `/config` | Public update of session policy (persisted to Redis & PostgreSQL audit) |
 | POST | `/requests/test` | Make one real rate-limit decision; returns 200 or 429 |
 | POST | `/traffic/generate` | Bounded traffic batch: `{ "count": 10, "requests_per_second": 20, "client_id": "demo" }` |
 | GET | `/queue/status` | RabbitMQ queue depth |
 | GET | `/worker/status` | Worker heartbeat and processed count |
-| GET | `/faults` | Fault feature state |
-| POST | `/faults` | Admin-only controlled test fault |
-| DELETE | `/faults` | Admin-only clear all shared temporary fault toggles |
-| POST | `/benchmarks/run` | Admin-only bounded sequential sample |
-| GET | `/benchmarks` | Stored sample reports |
+| GET | `/faults` | Active session fault simulation status |
+| POST | `/faults` | Trigger controlled test fault for current demo session |
+| DELETE | `/faults` | Clear active fault simulations for current demo session |
+| POST | `/benchmarks/run` | Run bounded sequential benchmark for current demo session |
+| GET | `/benchmarks` | Stored benchmark reports |
+| GET | `/logs/summary` | Summary counts calculated from PostgreSQL records for session |
+| GET | `/logs/requests` | Paginated structured PostgreSQL request logs with filters |
+| GET | `/logs/requests/<id>` | Full request detail record from PostgreSQL |
+| GET | `/logs/configurations` | Historical audit log of policy updates from PostgreSQL |
+| GET | `/logs/faults` | History of simulated faults and recovery times from PostgreSQL |
+| GET | `/logs/system-events` | System events filtered by severity and component |
+| GET | `/logs/requests/export.csv` | Safe CSV download with formula injection protection |
+| POST | `/logs/cleanup` | Purge expired sessions and their associated logs |
 
 Policy fields: `algorithm` (`token_bucket` or `sliding_window`), `rate` (1–100000 requests/second), `burst` (1–100000), `window_seconds` (1–3600), `edge_nodes` (1–100), `identity_strategy` (`header` or `ip`), `endpoint` (up to 256 characters), and `policy_id` (letters/numbers/underscore/hyphen). Sliding Window allows `rate * window_seconds` requests in the rolling duration.
 
