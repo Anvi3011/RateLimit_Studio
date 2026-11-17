@@ -15,7 +15,7 @@ def save_to_db(event, db_session=None):
             close_session = True
         except Exception as e:
             logger.warning("Could not obtain DB session in worker: %s", e)
-            return False
+            raise
 
     try:
         req_id = str(event.get('request_id') or event.get('event_id'))

@@ -6,4 +6,4 @@ COPY app ./app
 COPY tests ./tests
 COPY wsgi.py .
 EXPOSE 5000
-CMD ["gunicorn","-w","1","-b","0.0.0.0:5000","wsgi:app","--timeout","30"]
+CMD ["gunicorn","-w","1","--threads","4","-b","0.0.0.0:5000","wsgi:app","--timeout","1800"]

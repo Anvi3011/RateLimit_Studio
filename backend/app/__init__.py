@@ -114,4 +114,8 @@ def create_app(test_config=None):
     def missing(_):
         return jsonify(error='not_found'), 404
 
+    if not app.config['TESTING']:
+        from .faults import start_fault_reconciler
+        start_fault_reconciler(app)
+
     return app
