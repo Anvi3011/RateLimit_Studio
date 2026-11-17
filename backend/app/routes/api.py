@@ -12,6 +12,7 @@ from ..db import (
     log_configuration_change,
     log_fault_injection,
     log_fault_recovery,
+    reconcile_expired_faults,
     log_system_event,
     get_logs_summary,
     get_request_logs,
@@ -156,7 +157,7 @@ def health():
         result['database'] = 'healthy'
     except Exception:
         result['database'] = 'unavailable'
-    result['healthy'] = all(result[name] == 'healthy' for name in ('api', 'redis', 'rabbitmq', 'worker', 'publisher'))
+    result['healthy'] = all(result[name] == 'healthy' for name in ('api', 'redis', 'rabbitmq', 'worker', 'publisher', 'database'))
     return jsonify(result), (200 if result['healthy'] else 503)
 
 # =====================================================================
@@ -593,12 +594,12 @@ def get_faults():
 
 @api.post('/faults')
 def set_faults():
-    if not current_app.config['FAULTS_ENABLED']:
-        return jsonify(error='fault_injection_disabled'), 403
     sid = get_session_id()
     d = request.get_json(silent=True) or {}
     name = d.get('name')
     enabled = bool(d.get('enabled', True))
+    if enabled and not current_app.config['FAULTS_ENABLED']:
+        return jsonify(error='fault_injection_disabled'), 403
     if name not in ('redis_unavailable', 'rabbitmq_unavailable', 'worker_unavailable', 'api_degraded', 'network_timeout', 'latency_ms'):
         return jsonify(error='unsupported_fault'), 400
     try:
@@ -615,41 +616,36 @@ def set_faults():
         'latency_ms': 'Flask API'
     }
 
-    if name == 'latency_ms':
-        if not enabled:
-            store().delete(f'ratelimit:fault:{sid}:latency_ms')
-            log_fault_recovery(sid, 'latency_ms')
-            return get_faults()
-        try:
-            value = max(0, min(2000, int(d.get('value', 250))))
-        except (ValueError, TypeError):
-            return jsonify(error='latency_ms must be an integer'), 400
-        store().set(f'ratelimit:fault:{sid}:latency_ms', str(value), ex=duration)
-        log_fault_injection(sid, 'latency_ms', component_map['latency_ms'], duration, f'Added {value}ms artificial delay')
-    else:
-        try:
-            fkey = f'ratelimit:fault:{sid}:{name}'
-            if enabled:
-                store().set(fkey, '1', ex=duration)
-                # Keep compatibility key
-                log_fault_injection(sid, name, component_map.get(name, 'System'), duration)
-            else:
-                store().delete(fkey)
-                log_fault_recovery(sid, name)
-        except Exception:
-            return jsonify(error='redis_unavailable'), 503
+    try:
+        r = store()
+        if enabled:
+            value = 1
+            if name == 'latency_ms':
+                try:
+                    value = max(0, min(2000, int(d.get('value', 250))))
+                except (ValueError, TypeError):
+                    return jsonify(error='latency_ms must be an integer'), 400
+            log_fault_injection(sid, name, component_map[name], duration,
+                                f'Added {value}ms artificial delay' if name == 'latency_ms' else None,
+                                redis_client=r, value=value)
+        else:
+            log_fault_recovery(sid, name, redis_client=r)
+    except Exception as exc:
+        log.warning('Fault update failed (%s)', type(exc).__name__)
+        return jsonify(error='fault_update_failed'), 503
     return get_faults()
 
 @api.delete('/faults')
 def reset_faults():
     sid = get_session_id()
     try:
-        r = store()
-        for name in ('redis_unavailable', 'rabbitmq_unavailable', 'worker_unavailable', 'api_degraded', 'network_timeout', 'latency_ms'):
-            r.delete(f'ratelimit:fault:{sid}:{name}')
-        log_fault_recovery(sid)
-    except Exception:
-        return jsonify(error='redis_unavailable'), 503
+        # Fixed order also avoids deadlocks with concurrent Restore All requests.
+        for name in sorted(('redis_unavailable', 'rabbitmq_unavailable', 'worker_unavailable',
+                            'api_degraded', 'network_timeout', 'latency_ms')):
+            log_fault_recovery(sid, name, redis_client=store())
+    except Exception as exc:
+        log.warning('Fault recovery failed (%s)', type(exc).__name__)
+        return jsonify(error='fault_update_failed'), 503
     return jsonify(active={})
 
 # =====================================================================
@@ -784,6 +780,10 @@ def logs_faults():
     page = request.args.get('page', 1)
     page_size = request.args.get('page_size', 50)
     try:
+        reconcile_expired_faults(store(), session_id=sid)
+    except Exception as exc:
+        log.warning('Fault history reconciliation deferred (%s)', type(exc).__name__)
+    try:
         data = get_fault_logs(sid, page, page_size)
         return jsonify(data), 200
     except Exception as e:
@@ -809,7 +809,7 @@ def export_request_logs_csv():
     sid = get_session_id()
     try:
         # Fetch up to 1000 latest logs for export
-        data = get_request_logs(sid, filters={}, page=1, page_size=1000)
+        data = get_request_logs(sid, filters={}, page=1, page_size=1000, page_size_limit=1000)
         items = data.get('items', [])
 
         def sanitize_csv_cell(val):

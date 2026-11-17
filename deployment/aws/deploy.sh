@@ -15,7 +15,7 @@ for raw in Path('.env').read_text().splitlines():
     if line and not line.startswith('#') and '=' in line:
         key, value = line.split('=', 1)
         values[key.strip()] = value.strip().strip('"\'')
-for key in ('RABBITMQ_USER', 'RABBITMQ_PASSWORD', 'POSTGRES_USER', 'POSTGRES_PASSWORD'):
+for key in ('RABBITMQ_USER', 'RABBITMQ_PASSWORD', 'POSTGRES_USER', 'POSTGRES_PASSWORD', 'SESSION_SECRET'):
     value = values.get(key, '')
     if not value or value.lower().startswith(('change-me', 'replace-', 'your-')):
         raise SystemExit(f'{key} is missing or remains a placeholder in .env')
@@ -23,6 +23,8 @@ if len(values['POSTGRES_PASSWORD']) < 16:
     raise SystemExit('POSTGRES_PASSWORD must contain at least 16 characters')
 if len(values['RABBITMQ_PASSWORD']) < 64 or not all(c in '0123456789abcdefABCDEF' for c in values['RABBITMQ_PASSWORD']):
     raise SystemExit('RABBITMQ_PASSWORD must be 64 or more hexadecimal characters (URL-safe for the Compose AMQP URL)')
+if len(values['SESSION_SECRET']) < 32:
+    raise SystemExit('SESSION_SECRET must contain at least 32 characters')
 if values.get('FAULTS_ENABLED', 'false').lower() != 'false':
     raise SystemExit('FAULTS_ENABLED must be false for deployment')
 if values.get('HTTP_PORT', '8080') != '80':
@@ -48,7 +50,7 @@ case "$MODE" in
     [[ "${HEALTHCHECK_URL:-}" == https://* ]] || { echo "Set HEALTHCHECK_URL=https://your-domain/api/health for TLS verification." >&2; exit 1; }
     docker compose config --quiet
     docker compose stop nginx || true
-    docker compose --profile tls up -d --build redis rabbitmq backend worker publisher frontend nginx-tls
+    docker compose --profile tls up -d --build postgres redis rabbitmq backend worker publisher frontend nginx-tls
     ;;
   *) echo "Usage: $0 [http|tls]" >&2; exit 2 ;;
 esac

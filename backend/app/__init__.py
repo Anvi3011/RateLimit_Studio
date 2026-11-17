@@ -34,7 +34,14 @@ def create_app(test_config=None):
 
     # Only trusted proxy hops may supply forwarding headers.
     # Verify the actual proxy chain before production deployment.
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=2, x_proto=1, x_host=1)
+    # The deployed chain is edge nginx -> frontend nginx -> backend.
+    # Both proxies append X-Forwarded-For, but the frontend overwrites
+    # X-Forwarded-Proto with the edge's verified value. Do not trust
+    # client-controlled X-Forwarded-Host. Reassess if topology changes.
+    num_proxies = int(os.getenv('NUM_PROXIES', '2'))
+    if num_proxies not in (1, 2):
+        raise ValueError('NUM_PROXIES must match the trusted nginx proxy chain (1 or 2)')
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=num_proxies, x_proto=1, x_host=0)
 
     frontend_origins = os.getenv(
         'FRONTEND_ORIGIN',
@@ -106,5 +113,9 @@ def create_app(test_config=None):
     @app.errorhandler(404)
     def missing(_):
         return jsonify(error='not_found'), 404
+
+    if not app.config['TESTING']:
+        from .faults import start_fault_reconciler
+        start_fault_reconciler(app)
 
     return app

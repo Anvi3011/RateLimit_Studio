@@ -7,6 +7,7 @@ import {
   RotateCcw, FileText, Download, Filter, Search, Layers, Clock, ArrowDownToLine
 } from 'lucide-react';
 import './styles/app.css';
+import Slider from './components/Slider';
 
 const INFO_TERMS = {
   'Token Bucket': {
@@ -212,6 +213,12 @@ function App() {
   const [faults, setFaults] = useState({});
   const [faultTtl, setFaultTtl] = useState({});
   const [faultDuration, setFaultDuration] = useState(60);
+  const [faultLatency, setFaultLatency] = useState(250);
+  const [faultsEnabled, setFaultsEnabled] = useState(false);
+  const [customCount, setCustomCount] = useState(25);
+  const [trafficCount, setTrafficCount] = useState(25);
+  const [trafficRate, setTrafficRate] = useState(100);
+  const [trafficBusy, setTrafficBusy] = useState(false);
   const [series, setSeries] = useState([]);
   const [msg, setMsg] = useState('');
   const [currentSession, setCurrentSession] = useState(null);
@@ -345,6 +352,7 @@ function App() {
         if (!formDirty.current) setCfg(c);
       }
       setRows(d.items || []);
+      setFaultsEnabled(e.enabled);
       setFaults(e.active || {});
       setFaultTtl(e.ttl_seconds || {});
       setSeries(f.points || []);
@@ -374,16 +382,20 @@ function App() {
   }
 
   async function traffic(n, client = 'demo-client', endpoint = (appliedCfg?.endpoint || cfg.endpoint || '/api/demo'), rate = 100) {
+    if (trafficBusy) return;
+    setTrafficBusy(true);
     try {
       const r = await call('/traffic/generate', {
         method: 'POST',
         body: JSON.stringify({ count: n, client_id: client, endpoint, requests_per_second: rate })
       });
-      setMsg(`Offered ${r.offered}: ${r.accepted} accepted, ${r.rejected} rejected`);
+      setMsg(`Offered ${r.offered}: ${r.accepted} accepted, ${r.rejected} rejected, ${r.errors || 0} errors`);
       refresh();
       if (tab === 'Logs & Analytics') refreshLogs();
     } catch (e) {
       setMsg(e.message);
+    } finally {
+      setTrafficBusy(false);
     }
   }
 
@@ -413,7 +425,7 @@ function App() {
     try {
       await call('/faults', {
         method: 'POST',
-        body: JSON.stringify({ name: k, enabled: on, value: 250, duration_seconds: faultDuration })
+        body: JSON.stringify({ name: k, enabled: on, value: faultLatency, duration_seconds: faultDuration })
       });
       refresh();
       if (tab === 'Logs & Analytics') refreshLogs();
@@ -475,6 +487,7 @@ function App() {
   }
 
   const activeCfg = appliedCfg || cfg;
+  const windowQuota = cfg.algorithm === 'sliding_window' ? (cfg.window_seconds || 1) : 1;
   const card = (label, value, detail = '', color = '') => (
     <div className="metric" key={label}>
       <span>{label}</span>
@@ -570,6 +583,7 @@ function App() {
               <div className="buttons">
                 <button
                   className="secondary"
+                  disabled={trafficBusy}
                   onClick={() => {
                     if (navigator.webdriver) {
                       traffic(10);
@@ -587,6 +601,7 @@ function App() {
                 </button>
                 <button
                   className="primary"
+                  disabled={trafficBusy}
                   onClick={() => {
                     if (navigator.webdriver) {
                       traffic(100);
@@ -664,7 +679,7 @@ function App() {
                   ['RabbitMQ', h.rabbitmq],
                   ['Worker', h.worker],
                   ['Publisher', h.publisher],
-                  ['PostgreSQL DB', h.database || 'healthy']
+                  ['PostgreSQL DB', h.database || 'unknown']
                 ].map(([n, s]) => (
                   <div className="healthrow" key={n}>
                     <span>{n}</span>
@@ -689,6 +704,17 @@ function App() {
               </div>
             </div>
           </>
+        )}
+
+        {tab === 'Overview' && (
+          <div className="panel config">
+            <h3>Custom traffic</h3>
+            <Slider id="overview-count" label="Number of requests" min={1} max={500}
+              unit="requests" value={customCount} onChange={setCustomCount} disabled={trafficBusy} />
+            <button className="primary" disabled={trafficBusy} onClick={() => traffic(customCount)}>
+              {trafficBusy ? 'Generating requests...' : 'Generate Requests'}
+            </button>
+          </div>
         )}
 
         {/* CONFIGURATION TAB */}
@@ -724,22 +750,16 @@ function App() {
 
             <div className="fields">
               {[
-                ['Maximum requests / second', 'rate'],
-                ['Burst capacity', 'burst'],
-                ['Window duration (seconds)', 'window_seconds'],
-                ['Edge nodes', 'edge_nodes']
-              ].map(([label, key]) => (
-                <label key={key}>
-                  <span id={`config-label-${key}`}>{label} <InfoBtn term={label} /></span>
-                  <input
-                    aria-label={label}
-                    disabled={!configReady}
-                    type="number"
-                    min="1"
-                    value={cfg[key] ?? ''}
-                    onChange={(e) => editConfig({ ...cfg, [key]: +e.target.value })}
-                  />
-                </label>
+                [cfg.algorithm === 'sliding_window' ? 'Maximum allowed requests' : 'Maximum requests / second', 'rate', 100000 * windowQuota, cfg.algorithm === 'sliding_window' ? 'requests/window' : 'tokens/s'],
+                ['Burst capacity', 'burst', 100000, 'tokens'],
+                ['Window duration (seconds)', 'window_seconds', 3600, 's'],
+                ['Edge nodes', 'edge_nodes', 100, 'logical nodes']
+              ].map(([label, key, max, unit]) => (
+                <Slider key={key} id={`config-${key}`} label={label} min={key === 'rate' ? windowQuota : 1} max={max}
+                  step={key === 'rate' ? windowQuota : 1}
+                  help={key === 'rate' && windowQuota > 1 ? `Window quota = integer requests/second times ${windowQuota} seconds.` : undefined}
+                  unit={unit} value={(cfg[key] ?? 1) * (key === 'rate' ? windowQuota : 1)} disabled={!configReady || saving}
+                  onChange={(value) => editConfig({ ...cfg, [key]: key === 'rate' ? value / windowQuota : value })} />
               ))}
               <label>
                 <span>API endpoint <InfoBtn term="API endpoint" /></span>
@@ -770,13 +790,16 @@ function App() {
               {saving ? 'Applying configuration…' : 'Apply configuration'}
             </button>
 
+          </div>
+        )}
+
+        {(tab === 'Configuration' || tab === 'Traffic Inspector') && (
+          <div className="panel config">
             <div className="divider" />
             <h3>Traffic generation</h3>
             <div className="fields">
-              <label>
-                <span>Requests <InfoBtn term="Allowed Requests" /></span>
-                <input id="traffic-count" type="number" defaultValue="25" min="1" max="500" />
-              </label>
+              <Slider id="traffic-count" label="Requests" min={1} max={500} value={trafficCount}
+                unit="requests" disabled={trafficBusy} onChange={setTrafficCount} />
               <label>
                 <span>Client identifier <InfoBtn term="X-Client-ID" /></span>
                 <input id="traffic-client" defaultValue="demo-client" />
@@ -785,18 +808,17 @@ function App() {
                 <span>API endpoint <InfoBtn term="API endpoint" /></span>
                 <input id="traffic-endpoint" defaultValue={cfg.endpoint || '/api/demo'} />
               </label>
-              <label>
-                <span>Incoming requests / second <InfoBtn term="Request Rate" /></span>
-                <input id="traffic-rate" type="number" min="0.1" max="200" defaultValue="100" />
-              </label>
+              <Slider id="traffic-rate" label="Incoming requests / second" min={1} max={200}
+                unit="RPS" value={trafficRate} disabled={trafficBusy} onChange={setTrafficRate} />
             </div>
             <button
               className="secondary"
+              disabled={trafficBusy}
               onClick={() => {
-                const count = +(document.getElementById('traffic-count')?.value || 25);
+                const count = trafficCount;
                 const client = document.getElementById('traffic-client')?.value || 'demo-client';
                 const ep = document.getElementById('traffic-endpoint')?.value || '/api/demo';
-                const rate = +(document.getElementById('traffic-rate')?.value || 100);
+                const rate = trafficRate;
 
                 if (navigator.webdriver) {
                   traffic(count, client, ep, rate);
@@ -1159,7 +1181,7 @@ function App() {
                             </span>
                           </td>
                           <td>
-                            <span className="tag amber">{f.recovery_status}</span>
+                            <span className={'tag ' + (f.recovery_status === 'PENDING' ? 'amber' : 'green')}>{f.recovery_status}</span>
                           </td>
                           <td>
                             <small>{f.recovery_timestamp ? new Date(f.recovery_timestamp).toLocaleTimeString() : 'In progress'}</small>
@@ -1233,19 +1255,15 @@ function App() {
         {tab === 'Fault Injection' && (
           <div className="panel">
             <h2>Controlled fault injection</h2>
+            {!faultsEnabled && <p className="hint">Fault activation is disabled by the local server configuration.</p>}
             <p>Simulate failures safely. Faults are strictly isolated to your demo session and do not disrupt other visitors.</p>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '15px', maxWidth: '380px', marginTop: '16px' }}>
-              <label className="admin" style={{ maxWidth: '100%', margin: 0 }}>
-                <span>Auto-expire after (seconds) <InfoBtn term="Recovery behaviour" /></span>
-                <input
-                  type="number"
-                  min="1"
-                  max="300"
-                  value={faultDuration}
-                  onChange={(e) => setFaultDuration(Math.max(1, Math.min(300, +e.target.value || 1)))}
-                />
-              </label>
+              <Slider id="fault-duration" label="Auto-expire after (seconds)" min={1} max={300}
+                unit="s" value={faultDuration} onChange={setFaultDuration} disabled={!faultsEnabled} />
+              <Slider id="fault-latency" label="Artificial latency" min={0} max={2000}
+                unit="ms" value={faultLatency} onChange={setFaultLatency} disabled={!faultsEnabled}
+                help="Applied on the next injection. Existing faults retain their original values until restored or expired." />
             </div>
 
             {[
@@ -1254,7 +1272,7 @@ function App() {
               ['worker_unavailable', 'Worker unavailable', 'Consumer pauses; queue depth should rise and drain after recovery.', 'Worker crash'],
               ['api_degraded', 'API degraded', 'Adds controlled processing delay.', 'Recovery behaviour'],
               ['network_timeout', 'Network timeout', 'Exceeds the reverse proxy read timeout; expires automatically.', 'Network partition'],
-              ['latency_ms', 'Artificial latency', 'Adds 250 ms to decision processing.', 'Recovery behaviour']
+              ['latency_ms', 'Artificial latency', `Adds ${faultLatency} ms to decision processing.`, 'Recovery behaviour']
             ].map(([key, title, desc, infoTermKey]) => (
               <div className="faultrow" key={key}>
                 <div>
@@ -1267,6 +1285,7 @@ function App() {
                   </small>
                 </div>
                 <button
+                  disabled={!faultsEnabled && !faults[key]}
                   className={faults[key] ? 'danger' : 'secondary'}
                   onClick={() => {
                     const prompt = 'This will simulate a component failure for your demo session. Continue?';

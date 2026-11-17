@@ -86,81 +86,164 @@ def log_configuration_change(session_id, prev_alg, new_alg, prev_cfg, new_cfg, s
         if close:
             session.close()
 
-def log_fault_injection(session_id, fault_type, component, duration_seconds=60, description=None, db_session=None):
+def _fault_lock(session, session_id, fault_type):
+    """Serialize each session/type across threads and Gunicorn processes."""
+    if session.get_bind().dialect.name == 'postgresql':
+        import hashlib
+        from sqlalchemy import text
+        key = int.from_bytes(hashlib.sha256(f'{session_id}:{fault_type}'.encode()).digest()[:8], 'big', signed=True)
+        session.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': key})
+
+
+def _fault_rows(session, session_id, fault_type):
+    return session.query(FaultInjectionLog).filter(
+        FaultInjectionLog.demo_session_id == session_id,
+        FaultInjectionLog.fault_type == fault_type,
+        FaultInjectionLog.fault_status == 'ACTIVE'
+    ).order_by(FaultInjectionLog.id).with_for_update().all()
+
+
+def _aware(value):
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _fault_clock(redis_client):
+    if redis_client is None:
+        return _utcnow()
+    seconds, micros = redis_client.time()
+    return datetime.fromtimestamp(seconds + micros / 1_000_000, timezone.utc)
+
+
+def _finish_fault(session, entry, status, recovery_status, when):
+    if entry.fault_status != 'ACTIVE':
+        return
+    entry.fault_status = status
+    entry.recovery_status = recovery_status
+    entry.recovery_timestamp = when
+    session.add(SystemEvent(
+        demo_session_id=entry.demo_session_id,
+        event_type='FAULT_INJECTION_RECOVERED', component='FaultManager', severity='INFO',
+        message=f'Simulated fault {entry.fault_type}: {recovery_status}',
+        event_timestamp=when,
+        metadata_json=json.dumps({'fault_id': entry.id, 'fault_type': entry.fault_type,
+                                  'recovery_status': recovery_status})
+    ))
+
+
+def log_fault_injection(session_id, fault_type, component, duration_seconds=60, description=None,
+                        db_session=None, redis_client=None, value=1):
     session = db_session or get_session_factory()()
-    close = db_session is None
     try:
-        now = _utcnow()
-        end_time = now + timedelta(seconds=duration_seconds)
+        _fault_lock(session, session_id, fault_type)
+        previous = _fault_rows(session, session_id, fault_type)
+        now = _fault_clock(redis_client)
+        # Redis expiry and the durable deadline use the same millisecond instant.
+        deadline_ms = int(now.timestamp() * 1000) + duration_seconds * 1000
+        end_time = datetime.fromtimestamp(deadline_ms / 1000, timezone.utc)
+        key = f'ratelimit:fault:{session_id}:{fault_type}'
+        was_active = bool(redis_client.exists(key)) if redis_client is not None else True
         entry = FaultInjectionLog(
-            demo_session_id=session_id,
-            fault_type=fault_type,
-            component_affected=component,
-            simulation_start_time=now,
-            simulation_end_time=end_time,
-            fault_status='ACTIVE',
-            recovery_status='PENDING',
+            demo_session_id=session_id, fault_type=fault_type, component_affected=component,
+            simulation_start_time=now, simulation_end_time=end_time,
+            fault_status='ACTIVE', recovery_status='PENDING',
             description=description or f'Simulated {fault_type} failure on {component} (duration: {duration_seconds}s)'
         )
         session.add(entry)
-
-        event = SystemEvent(
-            demo_session_id=session_id,
-            event_type='FAULT_INJECTION_TRIGGERED',
-            component='FaultManager',
-            severity='WARNING',
-            message=f'Injected simulated fault: {fault_type} on {component}',
-            event_timestamp=now,
-            metadata_json=json.dumps({'fault_type': fault_type, 'duration_seconds': duration_seconds})
-        )
-        session.add(event)
+        session.flush()
+        if redis_client is not None:
+            redis_client.set(key, str(value), pxat=deadline_ms)
+        for old in previous:
+            if old.simulation_end_time and _aware(old.simulation_end_time) <= now and (not was_active or old.id != previous[-1].id):
+                _finish_fault(session, old, 'EXPIRED', 'AUTO_RECOVERED', old.simulation_end_time)
+            else:
+                _finish_fault(session, old, 'CLEARED', 'SUPERSEDED', now)
+        session.add(SystemEvent(
+            demo_session_id=session_id, event_type='FAULT_INJECTION_TRIGGERED',
+            component='FaultManager', severity='WARNING',
+            message=f'Injected simulated fault: {fault_type} on {component}', event_timestamp=now,
+            metadata_json=json.dumps({'fault_id': entry.id, 'fault_type': fault_type,
+                                      'duration_seconds': duration_seconds})
+        ))
         session.commit()
         return entry.to_dict()
-    except Exception as e:
+    except Exception:
         session.rollback()
-        logger.error("log_fault_injection failed: %s", e)
-        return None
+        raise
     finally:
-        if close:
+        if db_session is None:
             session.close()
 
-def log_fault_recovery(session_id, fault_type=None, recovery_status='MANUAL_RECOVERED', db_session=None):
+
+def log_fault_recovery(session_id, fault_type=None, recovery_status='MANUAL_RECOVERED',
+                       db_session=None, redis_client=None):
     session = db_session or get_session_factory()()
-    close = db_session is None
     try:
-        now = _utcnow()
-        query = session.query(FaultInjectionLog).filter(
-            FaultInjectionLog.demo_session_id == session_id,
-            FaultInjectionLog.fault_status == 'ACTIVE'
-        )
-        if fault_type:
-            query = query.filter(FaultInjectionLog.fault_type == fault_type)
-
-        active_faults = query.all()
-        for f in active_faults:
-            f.fault_status = 'CLEARED'
-            f.recovery_status = recovery_status
-            f.recovery_timestamp = now
-
-        event = SystemEvent(
-            demo_session_id=session_id,
-            event_type='FAULT_INJECTION_RECOVERED',
-            component='FaultManager',
-            severity='INFO',
-            message=f'Simulated fault(s) restored: {fault_type or "all"}',
-            event_timestamp=now,
-            metadata_json=json.dumps({'fault_type': fault_type, 'recovery_status': recovery_status})
-        )
-        session.add(event)
+        names = [fault_type] if fault_type else [row[0] for row in session.query(
+            FaultInjectionLog.fault_type).filter_by(demo_session_id=session_id, fault_status='ACTIVE')
+            .distinct().order_by(FaultInjectionLog.fault_type).all()]
+        count = 0
+        for name in names:
+            _fault_lock(session, session_id, name)
+            rows = _fault_rows(session, session_id, name)
+            now = _fault_clock(redis_client)
+            key = f'ratelimit:fault:{session_id}:{name}'
+            present = bool(redis_client.exists(key)) if redis_client is not None else True
+            if redis_client is not None:
+                redis_client.delete(key)
+            for entry in rows:
+                # A late/repeated Restore must not rewrite an automatic expiry as manual.
+                if entry.simulation_end_time and _aware(entry.simulation_end_time) <= now and (not present or entry.id != rows[-1].id):
+                    _finish_fault(session, entry, 'EXPIRED', 'AUTO_RECOVERED', entry.simulation_end_time)
+                elif entry.id != rows[-1].id:
+                    _finish_fault(session, entry, 'CLEARED', 'SUPERSEDED', now)
+                else:
+                    _finish_fault(session, entry, 'CLEARED', recovery_status, now)
+                count += 1
         session.commit()
-        return len(active_faults)
-    except Exception as e:
+        return count
+    except Exception:
         session.rollback()
-        logger.error("log_fault_recovery failed: %s", e)
-        return 0
+        raise
     finally:
-        if close:
+        if db_session is None:
             session.close()
+
+
+def reconcile_expired_faults(redis_client, db_session=None, session_id=None):
+    """Durable, restart-safe expiry sweep; no Redis keyspace notifications or browser needed."""
+    session = db_session or get_session_factory()()
+    count = 0
+    try:
+        now = _fault_clock(redis_client)
+        query = session.query(FaultInjectionLog.demo_session_id, FaultInjectionLog.fault_type).filter(
+            FaultInjectionLog.fault_status == 'ACTIVE',
+            FaultInjectionLog.simulation_end_time <= now)
+        if session_id is not None:
+            query = query.filter(FaultInjectionLog.demo_session_id == session_id)
+        pairs = query.distinct().limit(200).all()
+        for sid, name in pairs:
+            _fault_lock(session, sid, name)
+            rows = _fault_rows(session, sid, name)
+            now = _fault_clock(redis_client)
+            present = redis_client.exists(f'ratelimit:fault:{sid}:{name}')
+            for entry in rows:
+                if not entry.simulation_end_time or _aware(entry.simulation_end_time) > now:
+                    continue
+                # Never close the latest generation while Redis still enforces it.
+                # Older overdue legacy rows must not close a newer active generation.
+                if entry.id == rows[-1].id and present:
+                    continue
+                _finish_fault(session, entry, 'EXPIRED', 'AUTO_RECOVERED', entry.simulation_end_time)
+                count += 1
+            session.commit()
+        return count
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        if db_session is None:
+            session.close()
+
 
 def log_system_event(event_type, component, severity, message, session_id=None, correlation_id=None, metadata=None, db_session=None):
     session = db_session or get_session_factory()()
@@ -234,7 +317,7 @@ def get_logs_summary(session_id, db_session=None):
         if close:
             session.close()
 
-def get_request_logs(session_id, filters=None, page=1, page_size=50, db_session=None):
+def get_request_logs(session_id, filters=None, page=1, page_size=50, db_session=None, page_size_limit=100):
     session = db_session or get_session_factory()()
     close = db_session is None
     filters = filters or {}
@@ -271,7 +354,7 @@ def get_request_logs(session_id, filters=None, page=1, page_size=50, db_session=
 
         total = query.count()
         page = max(1, int(page))
-        page_size = min(100, max(1, int(page_size)))
+        page_size = min(page_size_limit, max(1, int(page_size)))
         rows = query.order_by(desc(RequestLog.request_timestamp)).offset((page - 1) * page_size).limit(page_size).all()
 
         return {

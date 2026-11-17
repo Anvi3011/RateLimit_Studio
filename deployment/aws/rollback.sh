@@ -33,7 +33,7 @@ case "$MODE" in
     DC+=(--profile tls)
     "${DC[@]}" config --quiet
     "${DC[@]}" stop nginx || true
-    "${DC[@]}" up -d --build redis rabbitmq backend worker publisher frontend nginx-tls
+    "${DC[@]}" up -d --build postgres redis rabbitmq backend worker publisher frontend nginx-tls
     URL="$HEALTHCHECK_URL"
     ;;
   *) echo "Usage: rollback.sh <known-good-commit-or-tag> [http|tls]" >&2; exit 2 ;;

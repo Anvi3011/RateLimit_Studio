@@ -127,8 +127,8 @@ class FaultInjectionLog(Base):
     component_affected = Column(String(64), nullable=False)
     simulation_start_time = Column(DateTime(timezone=True), default=_utcnow, index=True, nullable=False)
     simulation_end_time = Column(DateTime(timezone=True), nullable=True)
-    fault_status = Column(String(32), default='ACTIVE', nullable=False)  # 'ACTIVE', 'RECOVERED', 'CLEARED'
-    recovery_status = Column(String(32), default='PENDING', nullable=False)  # 'PENDING', 'AUTO_RECOVERED', 'MANUAL_RECOVERED'
+    fault_status = Column(String(32), default='ACTIVE', nullable=False)  # 'ACTIVE', 'EXPIRED', 'RECOVERED', 'CLEARED'
+    recovery_status = Column(String(32), default='PENDING', nullable=False)  # 'PENDING', 'AUTO_RECOVERED', 'MANUAL_RECOVERED', 'SUPERSEDED'
     recovery_timestamp = Column(DateTime(timezone=True), nullable=True)
     description = Column(Text, nullable=True)
 
