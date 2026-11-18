@@ -7,6 +7,15 @@ import {
   RotateCcw, FileText, Download, Filter, Search, Layers, Clock, ArrowDownToLine
 } from 'lucide-react';
 import './styles/app.css';
+import NumberSlider, { validInteger } from './components/NumberSlider.jsx';
+import { runTraffic, TRAFFIC_LIMITS } from './traffic.js';
+
+const CONFIG_NUMBERS = [
+  ['Maximum requests / second', 'rate', 100, 100000],
+  ['Burst capacity', 'burst', 500, 100000],
+  ['Window duration (seconds)', 'window_seconds', 60, 3600],
+  ['Edge nodes', 'edge_nodes', 10, 100],
+];
 
 const INFO_TERMS = {
   'Token Bucket': {
@@ -215,6 +224,15 @@ function App() {
   const [series, setSeries] = useState([]);
   const [msg, setMsg] = useState('');
   const [currentSession, setCurrentSession] = useState(null);
+  const [trafficCount, setTrafficCount] = useState(25);
+  const [trafficRps, setTrafficRps] = useState(100);
+  const [trafficRunning, setTrafficRunning] = useState(false);
+  const [trafficProgress, setTrafficProgress] = useState(null);
+  const trafficRun = useRef(null);
+  useEffect(() => () => trafficRun.current?.abort(), []);
+  const configValid = CONFIG_NUMBERS.every(([, key, , max]) => validInteger(cfg[key], 1, max));
+  const trafficValid = validInteger(trafficCount, 1, TRAFFIC_LIMITS.maxCount)
+    && validInteger(trafficRps, 1, 200);
 
   // Logs & Analytics State
   const [logsSubtab, setLogsSubtab] = useState('requests'); // 'requests' | 'configurations' | 'faults' | 'events'
@@ -374,26 +392,38 @@ function App() {
   }
 
   async function traffic(n, client = 'demo-client', endpoint = (appliedCfg?.endpoint || cfg.endpoint || '/api/demo'), rate = 100) {
+    if (trafficRun.current || saving) return;
+    const controller = new AbortController();
+    trafficRun.current = controller;
+    setTrafficRunning(true);
+    setTrafficProgress({ targetRps: Number(rate), accepted: 0, rejected: 0, errors: 0 });
     try {
-      const r = await call('/traffic/generate', {
-        method: 'POST',
-        body: JSON.stringify({ count: n, client_id: client, endpoint, requests_per_second: rate })
-      });
-      setMsg(`Offered ${r.offered}: ${r.accepted} accepted, ${r.rejected} rejected`);
+      const result = await runTraffic({ count: Number(n), rps: Number(rate), clientId: client,
+        endpoint, signal: controller.signal, onProgress: setTrafficProgress });
+      setTrafficProgress(result);
+      const stopped = result.stopReason ? ` (${result.stopReason.replaceAll('_', ' ')})` : '';
+      const unknown = result.unknown ? `; ${result.unknown} outcomes unknown; check history before retrying` : '';
+      const warnings = result.enqueueWarnings ? `; ${result.enqueueWarnings} logging enqueue warnings` : '';
+      setMsg(`Offered ${result.attempted}: ${result.accepted} accepted, ${result.rejected} rejected, ${result.errors} errors${stopped}. Target ${result.targetRps} RPS; observed ${result.achievedRps.toFixed(1)} requests/sec${unknown}${warnings}`);
       refresh();
       if (tab === 'Logs & Analytics') refreshLogs();
     } catch (e) {
       setMsg(e.message);
+    } finally {
+      trafficRun.current = null;
+      setTrafficRunning(false);
     }
   }
 
   async function save() {
+    if (!configValid || trafficRun.current) return;
     configRevision.current++;
     setSaving(true);
     try {
       const saved = await call('/config', {
         method: 'PUT',
-        body: JSON.stringify(cfg)
+        body: JSON.stringify({ ...cfg, ...Object.fromEntries(
+          CONFIG_NUMBERS.map(([, key]) => [key, Number(cfg[key])])) })
       });
       configRevision.current++;
       setAppliedCfg(saved);
@@ -558,6 +588,14 @@ function App() {
 
         {msg && <div className="notice" onClick={() => setMsg('')}>{msg}<b> ×</b></div>}
 
+        {trafficRunning && (
+          <div className="traffic-progress" role="status">
+            <span>Generating traffic: {trafficProgress ? trafficProgress.accepted + trafficProgress.rejected + trafficProgress.errors : 0} responses/outcomes recorded.
+              {' '}Target {trafficProgress?.targetRps || trafficRps} RPS; at most {TRAFFIC_LIMITS.maxInFlight} requests in flight.</span>
+            <button className="secondary" onClick={() => trafficRun.current?.abort()}>Cancel traffic</button>
+          </div>
+        )}
+
         {/* OVERVIEW TAB */}
         {tab === 'Overview' && (
           <>
@@ -570,6 +608,7 @@ function App() {
               <div className="buttons">
                 <button
                   className="secondary"
+                  disabled={trafficRunning || saving}
                   onClick={() => {
                     if (navigator.webdriver) {
                       traffic(10);
@@ -587,6 +626,7 @@ function App() {
                 </button>
                 <button
                   className="primary"
+                  disabled={trafficRunning || saving}
                   onClick={() => {
                     if (navigator.webdriver) {
                       traffic(100);
@@ -723,23 +763,13 @@ function App() {
             </p>
 
             <div className="fields">
-              {[
-                ['Maximum requests / second', 'rate'],
-                ['Burst capacity', 'burst'],
-                ['Window duration (seconds)', 'window_seconds'],
-                ['Edge nodes', 'edge_nodes']
-              ].map(([label, key]) => (
-                <label key={key}>
-                  <span id={`config-label-${key}`}>{label} <InfoBtn term={label} /></span>
-                  <input
-                    aria-label={label}
-                    disabled={!configReady}
-                    type="number"
-                    min="1"
-                    value={cfg[key] ?? ''}
-                    onChange={(e) => editConfig({ ...cfg, [key]: +e.target.value })}
-                  />
-                </label>
+              {CONFIG_NUMBERS.map(([label, key, sliderMax, backendMax]) => (
+                <NumberSlider key={key} id={`config-${key}`} label={label}
+                  info={<InfoBtn term={label} />} value={cfg[key] ?? ''}
+                  max={sliderMax} inputMax={backendMax} fallback={appliedCfg?.[key] || 1}
+                  disabled={!configReady || (key === 'burst' && cfg.algorithm === 'sliding_window')
+                    || (key === 'window_seconds' && cfg.algorithm === 'token_bucket')}
+                  onChange={(value) => editConfig({ ...cfg, [key]: value })} />
               ))}
               <label>
                 <span>API endpoint <InfoBtn term="API endpoint" /></span>
@@ -765,7 +795,7 @@ function App() {
             <button
               className="primary"
               onClick={save}
-              disabled={saving || !configReady}
+              disabled={saving || !configReady || !configValid || trafficRunning}
             >
               {saving ? 'Applying configuration…' : 'Apply configuration'}
             </button>
@@ -773,10 +803,9 @@ function App() {
             <div className="divider" />
             <h3>Traffic generation</h3>
             <div className="fields">
-              <label>
-                <span>Requests <InfoBtn term="Allowed Requests" /></span>
-                <input id="traffic-count" type="number" defaultValue="25" min="1" max="500" />
-              </label>
+              <NumberSlider id="traffic-count" label="Requests" info={<InfoBtn term="Allowed Requests" />}
+                value={trafficCount} onChange={setTrafficCount} max={1000} fallback={25}
+                disabled={trafficRunning} note="Safety limit: 500 requests per run." />
               <label>
                 <span>Client identifier <InfoBtn term="X-Client-ID" /></span>
                 <input id="traffic-client" defaultValue="demo-client" />
@@ -785,18 +814,18 @@ function App() {
                 <span>API endpoint <InfoBtn term="API endpoint" /></span>
                 <input id="traffic-endpoint" defaultValue={cfg.endpoint || '/api/demo'} />
               </label>
-              <label>
-                <span>Incoming requests / second <InfoBtn term="Request Rate" /></span>
-                <input id="traffic-rate" type="number" min="0.1" max="200" defaultValue="100" />
-              </label>
+              <NumberSlider id="traffic-rate" label="Incoming requests / second" info={<InfoBtn term="Request Rate" />}
+                value={trafficRps} onChange={setTrafficRps} max={200} fallback={100}
+                disabled={trafficRunning} note={`Target: ${trafficRps || '--'} RPS; actual throughput may be lower.`} />
             </div>
             <button
               className="secondary"
+              disabled={trafficRunning || saving || !configReady || !trafficValid}
               onClick={() => {
-                const count = +(document.getElementById('traffic-count')?.value || 25);
+                const count = Number(trafficCount);
                 const client = document.getElementById('traffic-client')?.value || 'demo-client';
                 const ep = document.getElementById('traffic-endpoint')?.value || '/api/demo';
-                const rate = +(document.getElementById('traffic-rate')?.value || 100);
+                const rate = Number(trafficRps);
 
                 if (navigator.webdriver) {
                   traffic(count, client, ep, rate);
@@ -812,6 +841,9 @@ function App() {
             >
               Generate traffic
             </button>
+            {Number(trafficCount) > TRAFFIC_LIMITS.maxCount && (
+              <p className="control-error" role="alert">Use at most 500 requests per run; the existing backend safety cap is unchanged.</p>
+            )}
           </div>
         )}
 
