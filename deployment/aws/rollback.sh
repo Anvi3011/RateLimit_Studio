@@ -17,8 +17,12 @@ git -C "$ROOT" archive "$REF" | tar -xf - -C "$RELEASE_DIR"
 
 # Preserve the current Compose project name so Docker reuses its existing named
 # volumes. Set COMPOSE_PROJECT_NAME explicitly if the original deploy used -p.
-PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT" | tr '[:upper:]' '[:lower:]')}"
+PROJECT="${COMPOSE_PROJECT_NAME:-$(docker compose --project-directory "$ROOT" --file "$ROOT/docker-compose.yml" --env-file "$ENV_FILE" config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')}"
 DC=(docker compose --project-name "$PROJECT" --file "$RELEASE_DIR/docker-compose.yml" --env-file "$ENV_FILE")
+# Refuse unsupported old releases before starting anything; never silently
+# switch volume identities or deploy a TLS service with another name.
+[[ -f "$RELEASE_DIR/deployment/aws/compose.ec2.yml" ]] || { echo "Target predates dual-mode overrides; use its reviewed rollback procedure." >&2; exit 1; }
+DC+=(-f "$RELEASE_DIR/deployment/aws/compose.ec2.yml")
 case "$MODE" in
   http)
     "${DC[@]}" config --quiet
@@ -30,10 +34,10 @@ case "$MODE" in
     [[ "${HEALTHCHECK_URL:-}" == https://* ]] || { echo "Set HEALTHCHECK_URL=https://your-domain/api/health for TLS health verification." >&2; exit 1; }
     [[ -s "$ROOT/deployment/tls/fullchain.pem" && -s "$ROOT/deployment/tls/privkey.pem" ]] || { echo "Current trusted TLS certificate/key not found." >&2; exit 1; }
     export TLS_CERT_DIR="$ROOT/deployment/tls"
-    DC+=(--profile tls)
+    DC+=(-f "$RELEASE_DIR/deployment/aws/compose.tls.yml")
     "${DC[@]}" config --quiet
-    "${DC[@]}" stop nginx || true
-    "${DC[@]}" up -d --build redis rabbitmq backend worker publisher frontend nginx-tls
+    "${DC[@]}" --profile tls stop nginx-tls || true
+    "${DC[@]}" up -d --build
     URL="$HEALTHCHECK_URL"
     ;;
   *) echo "Usage: rollback.sh <known-good-commit-or-tag> [http|tls]" >&2; exit 2 ;;

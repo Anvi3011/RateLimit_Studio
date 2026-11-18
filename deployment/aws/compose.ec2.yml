@@ -1,0 +1,13 @@
+# Always combine with the repository-root docker-compose.yml. No volumes renamed.
+services:
+  backend:
+    environment:
+      REQUIRE_POSTGRES: "true"
+      DB_POOL_SIZE: "3"
+      DB_MAX_OVERFLOW: "2"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health',timeout=12)"]
+      timeout: 15s
+  worker:
+    environment:
+      REQUIRE_POSTGRES: "true"

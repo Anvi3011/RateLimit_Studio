@@ -5,7 +5,7 @@ from ..algorithms.scripts import TOKEN_BUCKET, SLIDING_WINDOW
 _client = None
 def client():
     global _client
-    if _client is None: _client = redis.Redis.from_url(os.getenv('REDIS_URL','redis://localhost:6379/0'), socket_connect_timeout=.3, socket_timeout=.5, decode_responses=True)
+    if _client is None: _client = redis.Redis.from_url(os.getenv('REDIS_URL','redis://localhost:6379/0'), socket_connect_timeout=float(os.getenv('REDIS_CONNECT_TIMEOUT', '.3')), socket_timeout=float(os.getenv('REDIS_SOCKET_TIMEOUT', '.5')), decode_responses=True)
     return _client
 
 def key(client_id, endpoint, policy_id):

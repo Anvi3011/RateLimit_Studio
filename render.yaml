@@ -1,0 +1,50 @@
+# Apply only after deployment approval. Creates ONE free web service, no datastores.
+services:
+  - type: web
+    name: ratelimit-studio-demo
+    runtime: docker
+    plan: free
+    branch: deployment/dual-mode
+    dockerfilePath: ./deployment/public/Dockerfile
+    dockerContext: .
+    autoDeployTrigger: "off"
+    healthCheckPath: /api/live
+    envVars:
+      - key: PUBLIC_DEMO
+        value: "true"
+      - key: REQUIRE_POSTGRES
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: RABBITMQ_URL
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: FAULTS_ENABLED
+        value: "false"
+      - key: PROXY_X_FOR
+        value: "0"
+      - key: PROXY_X_PROTO
+        value: "0"
+      - key: PROXY_X_HOST
+        value: "0"
+      - key: DB_POOL_SIZE
+        value: "2"
+      - key: DB_MAX_OVERFLOW
+        value: "0"
+      - key: REDIS_CONNECT_TIMEOUT
+        value: "5"
+      - key: REDIS_SOCKET_TIMEOUT
+        value: "5"
+      - key: AMQP_PROBE_TIMEOUT
+        value: "2"
+      - key: HEARTBEAT_INTERVAL
+        value: "30"
+      - key: PUBLISHER_BLOCK_SECONDS
+        value: "20"
+      - key: OUTBOX_CAPACITY
+        value: "1000"

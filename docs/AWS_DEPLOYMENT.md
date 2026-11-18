@@ -1,3 +1,5 @@
+> Phase 2 update: use [the eight-service instructions](../deployment/aws/DUAL_MODE.md) for the current HTTP/TLS overrides. TLS now keeps the existing nginx service. No cloud deployment has been performed.
+
 # AWS Learner Lab deployment preparation
 
 This is a single EC2 Docker Compose deployment for an academic demonstration. It is not a production high-availability service. No AWS resources have been created. See `KNOWN_LIMITATIONS.md` before inviting users.

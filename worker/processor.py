@@ -2,6 +2,8 @@ import os
 import logging
 from datetime import datetime, timezone
 import redis
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from db import RequestLog, get_session, parse_dt
 
 logger = logging.getLogger(__name__)
@@ -10,19 +12,11 @@ def save_to_db(event, db_session=None):
     session = db_session
     close_session = False
     if session is None:
-        try:
-            session = get_session()
-            close_session = True
-        except Exception as e:
-            logger.warning("Could not obtain DB session in worker: %s", e)
-            return False
+        session = get_session()  # Failure must propagate: never ACK without a row.
+        close_session = True
 
     try:
         req_id = str(event.get('request_id') or event.get('event_id'))
-        existing = session.query(RequestLog).filter_by(request_id=req_id).first()
-        if existing:
-            return True  # Idempotent duplicate check
-
         req_ts = parse_dt(event.get('request_timestamp') or event.get('timestamp')) or datetime.now(timezone.utc)
         resp_ts = parse_dt(event.get('response_timestamp'))
 
@@ -53,12 +47,18 @@ def save_to_db(event, db_session=None):
             window_duration=event.get('window_duration'),
             edge_node_id=event.get('edge_id') or event.get('edge_node_id')
         )
-        session.add(log_entry)
+        # Database uniqueness is the durable authority, including concurrent delivery.
+        dialect = session.get_bind().dialect.name
+        insert = pg_insert if dialect == 'postgresql' else sqlite_insert
+        values = {c.name: getattr(log_entry, c.name) for c in RequestLog.__table__.columns
+                  if c.name not in ('id', 'created_at')}
+        result = session.execute(insert(RequestLog).values(**values).on_conflict_do_nothing(
+            index_elements=['request_id']))
         session.commit()
-        return True
+        return result.rowcount == 1
     except Exception as e:
         session.rollback()
-        logger.error("Failed to persist request log to PostgreSQL: %s", e)
+        logger.error("Request persistence failed (%s)", type(e).__name__)
         raise
     finally:
         if close_session:
@@ -68,22 +68,16 @@ def process(event, r=None, db_session=None):
     r = r or redis.Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'), decode_responses=True)
     marker = 'ratelimit:event:processed:' + str(event['event_id'])
 
-    # Check Redis deduplication marker
-    is_new = r.set(marker, '1', nx=True, ex=604800)
-    if not is_new:
-        return False
-
-    # Write to persistent PostgreSQL storage
-    try:
-        save_to_db(event, db_session=db_session)
-    except Exception as exc:
-        # Remove marker so failed event can be retried by RabbitMQ
-        try:
-            r.delete(marker)
-        except Exception:
-            pass
-        raise exc
-
-    r.hincrby('ratelimit:worker:by_decision', event.get('decision', 'unknown'), 1)
-    r.incr('ratelimit:worker:processed')
-    return True
+    # Never skip PostgreSQL because a Redis marker exists (including legacy markers).
+    inserted = save_to_db(event, db_session=db_session)
+    # Atomic telemetry AFTER commit. If Redis fails, redelivery verifies the row
+    # and retries telemetry. SQL uniqueness prevents a second history row.
+    r.eval("""
+        if redis.call('SET',KEYS[1],'1','NX','EX',604800) then
+          redis.call('HINCRBY',KEYS[2],ARGV[1],1)
+          redis.call('INCR',KEYS[3]); return 1
+        end
+        return 0
+    """, 3, marker, 'ratelimit:worker:by_decision', 'ratelimit:worker:processed',
+        event.get('decision', 'unknown'))
+    return inserted

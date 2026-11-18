@@ -1,0 +1,73 @@
+# Disposable LOCAL test stack. No persistent volumes or existing .env.
+# Optional browser profile exposes only localhost:18089.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: integration
+      POSTGRES_USER: integration
+      POSTGRES_PASSWORD: integration-only-not-a-deployment-secret
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U integration -d integration"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --save, "", --appendonly, "no"]
+    tmpfs: [/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  rabbitmq:
+    image: rabbitmq:4-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: integration
+      RABBITMQ_DEFAULT_PASS: integration-only
+    tmpfs: [/var/lib/rabbitmq]
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  demo:
+    image: ratelimit-studio-phase2-test
+    build:
+      context: ../..
+      dockerfile: deployment/public/Dockerfile
+    environment: &runtime
+      DATABASE_URL: postgresql://integration:integration-only-not-a-deployment-secret@postgres/integration
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://integration:integration-only@rabbitmq:5672/%2F
+      REQUIRE_POSTGRES: "true"
+      SESSION_SECRET: integration-only-session-secret-never-use-publicly
+      FRONTEND_ORIGIN: http://demo:10000,http://127.0.0.1:18089
+      PORT: "10000"
+      PUBLISHER_BLOCK_SECONDS: "2"
+      HEARTBEAT_INTERVAL: "2"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:10000/api/health',timeout=10)"]
+      interval: 3s
+      timeout: 12s
+      retries: 40
+  checks:
+    image: ratelimit-studio-phase2-test
+    environment: *runtime
+    command: [python, /checks/integration.py]
+    volumes: ["./integration.py:/checks/integration.py:ro"]
+    depends_on:
+      demo: {condition: service_healthy}
+  frontend:
+    profiles: [browser]
+    build: ../../frontend
+    command: [sh, -c, "sed -i 's/backend:5000/demo:10000/g' /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]
+    ports: ["127.0.0.1:18089:80"]
+    depends_on:
+      demo: {condition: service_healthy}

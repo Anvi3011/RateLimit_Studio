@@ -1,3 +1,5 @@
+> Phase 2: the independent public mode runs Gunicorn, publisher and consumer as supervised processes in one Render Free container, with external Neon/Upstash/CloudAMQP. PostgreSQL request-ID uniqueness is now authoritative; Redis markers never skip the durable write. See [PUBLIC_DEPLOYMENT.md](PUBLIC_DEPLOYMENT.md). The local eight-service topology remains intact.
+
 # Architecture
 
 ```mermaid

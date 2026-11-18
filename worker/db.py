@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, BigInteger, String, Float, DateTime, Integer, Text, Index
+from sqlalchemy import event, create_engine, Column, BigInteger, String, Float, DateTime, Integer, Text, Index
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,8 @@ _tables_initialized = False
 
 def get_database_url():
     url = os.getenv('DATABASE_URL')
+    if os.getenv('REQUIRE_POSTGRES', 'false').lower() == 'true' and (not url or not url.startswith(('postgresql://', 'postgres://'))):
+        raise RuntimeError('A PostgreSQL DATABASE_URL is required')
     if url:
         if url.startswith('postgres://'):
             url = url.replace('postgres://', 'postgresql://', 1)
@@ -63,8 +65,18 @@ def get_engine(db_url=None):
         engine = create_engine(
             url,
             pool_pre_ping=True,
+            pool_size=int(os.getenv('DB_POOL_SIZE', '5')),
+            max_overflow=int(os.getenv('DB_MAX_OVERFLOW', '5')),
+            pool_timeout=int(os.getenv('DB_POOL_TIMEOUT', '5')),
+            connect_args={'connect_timeout': int(os.getenv('DB_CONNECT_TIMEOUT', '5')), 'keepalives': 1, 'keepalives_idle': 30, 'keepalives_interval': 10, 'keepalives_count': 3},
             pool_recycle=1800
         )
+    if not url.startswith('sqlite'):
+        # Transaction-local settings work with Neon's PgBouncer pooler;
+        # startup `options=-c statement_timeout=...` is unsupported there.
+        @event.listens_for(engine, 'begin')
+        def transaction_limits(conn):
+            conn.exec_driver_sql('SET LOCAL statement_timeout = 10000')
     if db_url is None:
         _engine = engine
     return engine
@@ -78,12 +90,12 @@ def init_db(engine=None):
 def get_session(engine=None):
     global _SessionFactory, _tables_initialized
     eng = engine or get_engine()
-    if not _tables_initialized:
+    if not _tables_initialized and os.getenv('SCHEMA_INIT', 'true') == 'true':
         try:
             Base.metadata.create_all(bind=eng)
             _tables_initialized = True
         except Exception:
-            pass
+            raise
     if _SessionFactory is None or engine is not None:
         factory = sessionmaker(autocommit=False, autoflush=False, bind=eng)
         if engine is None:

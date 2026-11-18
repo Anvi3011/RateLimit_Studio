@@ -19,6 +19,8 @@ for key in ('RABBITMQ_USER', 'RABBITMQ_PASSWORD', 'POSTGRES_USER', 'POSTGRES_PAS
     value = values.get(key, '')
     if not value or value.lower().startswith(('change-me', 'replace-', 'your-')):
         raise SystemExit(f'{key} is missing or remains a placeholder in .env')
+if len(values.get('SESSION_SECRET', '')) < 32 or values.get('SESSION_SECRET', '').lower().startswith(('replace-', 'change-me', 'your-')):
+    raise SystemExit('Set a unique SESSION_SECRET with at least 32 characters')
 if len(values['POSTGRES_PASSWORD']) < 16:
     raise SystemExit('POSTGRES_PASSWORD must contain at least 16 characters')
 if len(values['RABBITMQ_PASSWORD']) < 64 or not all(c in '0123456789abcdefABCDEF' for c in values['RABBITMQ_PASSWORD']):
@@ -38,17 +40,19 @@ if os.environ.get('DEPLOY_MODE') == 'tls':
     if not (cert_dir / 'fullchain.pem').is_file() or not (cert_dir / 'privkey.pem').is_file():
         raise SystemExit('TLS mode requires fullchain.pem and privkey.pem in TLS_CERT_DIR')
 PY
+DC=(docker compose -f docker-compose.yml -f deployment/aws/compose.ec2.yml)
 case "$MODE" in
   http)
-    docker compose config --quiet
+    "${DC[@]}" config --quiet
     docker compose --profile tls stop nginx-tls || true
-    docker compose up -d --build
+    "${DC[@]}" up -d --build
     ;;
   tls)
     [[ "${HEALTHCHECK_URL:-}" == https://* ]] || { echo "Set HEALTHCHECK_URL=https://your-domain/api/health for TLS verification." >&2; exit 1; }
-    docker compose config --quiet
-    docker compose stop nginx || true
-    docker compose --profile tls up -d --build redis rabbitmq backend worker publisher frontend nginx-tls
+    DC+=(-f deployment/aws/compose.tls.yml)
+    "${DC[@]}" config --quiet
+    docker compose --profile tls stop nginx-tls || true
+    "${DC[@]}" up -d --build
     ;;
   *) echo "Usage: $0 [http|tls]" >&2; exit 2 ;;
 esac

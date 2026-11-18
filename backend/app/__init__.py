@@ -6,11 +6,13 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from .routes.api import api
 from .db import init_db
 from .session import get_current_session_id
+from .config import validate_public_config
 
 logger = logging.getLogger(__name__)
 
 
 def create_app(test_config=None):
+    validate_public_config()
     app = Flask(__name__)
 
     app.config.update(
@@ -28,13 +30,17 @@ def create_app(test_config=None):
 
     # Initialize database tables
     try:
-        init_db()
+        if os.getenv('SCHEMA_INIT', 'true') == 'true':
+            init_db()
     except Exception as exc:
-        logger.warning("Database initialization deferred or unavailable: %s", exc)
+        logger.warning("Database initialization unavailable (%s)", type(exc).__name__)
 
     # Only trusted proxy hops may supply forwarding headers.
     # Verify the actual proxy chain before production deployment.
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=2, x_proto=1, x_host=1)
+    app.wsgi_app = ProxyFix(app.wsgi_app,
+        x_for=int(os.getenv('PROXY_X_FOR', '2')),
+        x_proto=int(os.getenv('PROXY_X_PROTO', '1')),
+        x_host=int(os.getenv('PROXY_X_HOST', '1')))
 
     frontend_origins = os.getenv(
         'FRONTEND_ORIGIN',
@@ -52,7 +58,8 @@ def create_app(test_config=None):
     @app.before_request
     def resolve_session():
         # Ensure session is established for all requests.
-        get_current_session_id()
+        if request.path not in ('/api/live', '/api/health'):
+            get_current_session_id()
 
     @app.before_request
     def csrf_protect():
@@ -70,7 +77,8 @@ def create_app(test_config=None):
             if origin:
                 normalized_origin = origin.rstrip('/')
                 allowed = set(o.rstrip('/') for o in frontend_origins if o)
-                allowed.add(request.host_url.rstrip('/'))
+                if os.getenv('PUBLIC_DEMO', 'false') != 'true':
+                    allowed.add(request.host_url.rstrip('/'))
                 if any('localhost' in o or '127.0.0.1' in o for o in allowed):
                     allowed.update([
                         'http://localhost',
@@ -85,12 +93,14 @@ def create_app(test_config=None):
 
     @app.after_request
     def set_session_cookie(response):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
         if hasattr(g, 'session_id') and g.session_id:
             response.set_cookie(
                 'demo_session_id',
                 g.session_id,
                 httponly=True,
-                secure=request.is_secure,
+                secure=request.is_secure or os.getenv('PUBLIC_DEMO', 'false') == 'true',
                 samesite='Lax',
                 path='/',
                 max_age=int(app.config.get('LOG_RETENTION_HOURS', 24)) * 3600

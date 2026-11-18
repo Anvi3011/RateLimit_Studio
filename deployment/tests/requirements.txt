@@ -1,0 +1,4 @@
+-r ../../backend/requirements.txt
+fakeredis[lua]==2.27.0
+PyYAML==6.0.2
+jsonschema==4.23.0

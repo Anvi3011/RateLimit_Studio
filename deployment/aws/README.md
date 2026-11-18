@@ -1,3 +1,5 @@
+> Phase 2 update: use [DUAL_MODE.md](DUAL_MODE.md) for the current HTTP/TLS overrides. TLS now keeps the existing nginx service. No cloud deployment has been performed.
+
 # AWS deployment scripts
 
 These scripts prepare and operate the existing Docker Compose project on an Ubuntu 22.04/24.04 EC2 host. They do not call AWS APIs or create cloud resources.

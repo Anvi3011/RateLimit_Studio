@@ -1,0 +1,2 @@
+# EC2 executes these files with Linux Bash, including after Windows checkouts.
+*.sh text eol=lf

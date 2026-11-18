@@ -2,6 +2,10 @@
 
 A browser-based educational studio for edge-based distributed rate limiting. It demonstrates Token Bucket and Sliding Window policies, shared Redis state, real traffic decisions, operational metrics, a RabbitMQ event pipeline, and controlled fault injection.
 
+## Independent deployment modes
+
+Phase 2 configurations are prepared but not deployed. See [public free-demo setup](docs/PUBLIC_DEPLOYMENT.md) for Vercel + one supervised Render Free service + Neon/Upstash/CloudAMQP, and [EC2 eight-service mode](deployment/aws/DUAL_MODE.md) for the independent Lab deployment. Both preserve real processing and PostgreSQL logs; the public mode sleeps with Render. No paid resources are defined for the public mode.
+
 ## Technology stack
 
 - React and Vite dashboard, served by Nginx
@@ -47,7 +51,7 @@ Open [http://localhost:8080](http://localhost:8080). For browser-driven tests an
 
 ## Docker Compose services
 
-The default stack includes Redis, RabbitMQ, backend, worker, publisher, frontend, and Nginx. Redis and RabbitMQ have persistent named volumes and health checks. The publisher and backend also expose health status; Compose waits for healthy dependencies before starting the frontend. Optional `e2e`, `benchmarks`, and `tls` profiles add browser tests, Locust, and HTTPS edge service.
+The default stack includes PostgreSQL, Redis, RabbitMQ, backend, worker, publisher, frontend, and Nginx. Redis and RabbitMQ have persistent named volumes and health checks. The publisher and backend also expose health status; Compose waits for healthy dependencies before starting the frontend. Optional `e2e`, `benchmarks`, and `tls` profiles add browser tests, Locust, and HTTPS edge service.
 
 Check service health and logs:
 
@@ -73,7 +77,7 @@ Do not expose ports 5000, 6379, 5672, or 15672. Restrict SSH to your public IP `
 
 After an operator has created and configured the EC2 instance and security group, start the application with host port 80 and browse to `http://<EC2_PUBLIC_IPV4>/`. Anyone with that address can reach the demo from an ordinary web browser; their laptop does not need Python, Node.js, Docker, Redis, or RabbitMQ. The EC2 instance and Compose services must remain running. A stop/start may change the public IPv4 unless a static address is configured, so the address may need to be shared again. HTTP is unencrypted and suitable only for a temporary non-sensitive demo. Trusted HTTPS needs a domain you control and a valid public certificate; a self-signed certificate is not trusted by browsers.
 
-Policy changes, fault controls, benchmark runs, and metric resets require the shared admin token. The simulated traffic endpoints are intentionally available to browser users, so do not use this demo for sensitive data or unrestricted production workloads. Never share `.env` or the admin token with website visitors.
+The demo uses signed, isolated visitor sessions rather than an admin login. Controls are public within each session; fault activation is disabled by default. Never share `.env` or provider credentials. This educational demo is not suitable for sensitive data or unrestricted production workloads.
 
 ## Tests and benchmark
 

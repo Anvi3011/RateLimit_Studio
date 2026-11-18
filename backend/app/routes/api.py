@@ -125,6 +125,20 @@ def session_info():
 # =====================================================================
 # HEALTH CHECK
 # =====================================================================
+@api.get('/live')
+def live():
+    """Process liveness, without opening DB/broker connections or creating sessions."""
+    path = os.getenv('SUPERVISOR_STATUS_FILE')
+    if path:
+        try:
+            with open(path, encoding='utf-8') as f:
+                status = json.load(f)
+            if time.time() - status['updated_at'] > 10 or not all(status['running'].values()):
+                return jsonify(alive=False), 503
+        except (OSError, ValueError, KeyError):
+            return jsonify(alive=False), 503
+    return jsonify(alive=True)
+
 @api.get('/health')
 def health():
     result = {'api': 'healthy', 'redis': 'unavailable', 'rabbitmq': 'unknown', 'worker': 'unknown', 'publisher': 'unknown', 'database': 'unknown'}
@@ -136,7 +150,9 @@ def health():
     try:
         import pika
         p = pika.URLParameters(os.getenv('RABBITMQ_URL', 'amqp://localhost:5672/%2F'))
-        p.socket_timeout = 0.5
+        p.socket_timeout = float(os.getenv('AMQP_PROBE_TIMEOUT', '.5'))
+        p.stack_timeout = 5
+        p.blocked_connection_timeout = 3
         c = pika.BlockingConnection(p)
         c.close()
         result['rabbitmq'] = 'healthy'
@@ -156,7 +172,7 @@ def health():
         result['database'] = 'healthy'
     except Exception:
         result['database'] = 'unavailable'
-    result['healthy'] = all(result[name] == 'healthy' for name in ('api', 'redis', 'rabbitmq', 'worker', 'publisher'))
+    result['healthy'] = all(result[name] == 'healthy' for name in ('api', 'redis', 'rabbitmq', 'worker', 'publisher', 'database'))
     return jsonify(result), (200 if result['healthy'] else 503)
 
 # =====================================================================
@@ -168,7 +184,7 @@ def get_config():
     try:
         return jsonify(config_value(sid))
     except Exception as e:
-        return jsonify(error='redis_unavailable', detail=str(e)), 503
+        return jsonify(error='redis_unavailable', detail='Database operation failed'), 503
 
 @api.put('/config')
 def put_config():
@@ -196,7 +212,7 @@ def put_config():
 
         return jsonify(c)
     except ValueError as e:
-        return jsonify(error='invalid_config', detail=str(e)), 400
+        return jsonify(error='invalid_config', detail='Database operation failed'), 400
     except Exception as exc:
         log.error("Failed to update config: %s", exc)
         return jsonify(error='redis_unavailable'), 503
@@ -463,7 +479,9 @@ def metrics():
         try:
             import pika
             p = pika.URLParameters(os.getenv('RABBITMQ_URL', 'amqp://localhost:5672/%2F'))
-            p.socket_timeout = 0.5
+            p.socket_timeout = float(os.getenv('AMQP_PROBE_TIMEOUT', '.5'))
+            p.stack_timeout = 5
+            p.blocked_connection_timeout = 3
             c = pika.BlockingConnection(p)
             depth = c.channel().queue_declare('ratelimit.events', durable=True, passive=True).method.message_count
             c.close()
@@ -728,7 +746,7 @@ def logs_summary():
         return jsonify(summary), 200
     except Exception as e:
         log.error("Failed to fetch logs summary: %s", e)
-        return jsonify(error='database_unavailable', detail=str(e)), 503
+        return jsonify(error='database_unavailable', detail='Database operation failed'), 503
 
 @api.get('/logs/requests')
 def logs_requests():
@@ -752,7 +770,7 @@ def logs_requests():
         return jsonify(data), 200
     except Exception as e:
         log.error("Failed to fetch request logs: %s", e)
-        return jsonify(error='database_unavailable', detail=str(e)), 503
+        return jsonify(error='database_unavailable', detail='Database operation failed'), 503
 
 @api.get('/logs/requests/<request_id>')
 def logs_request_detail(request_id):
@@ -764,7 +782,7 @@ def logs_request_detail(request_id):
         return jsonify(record), 200
     except Exception as e:
         log.error("Failed to fetch request log detail: %s", e)
-        return jsonify(error='database_unavailable', detail=str(e)), 503
+        return jsonify(error='database_unavailable', detail='Database operation failed'), 503
 
 @api.get('/logs/configurations')
 def logs_configurations():
@@ -776,7 +794,7 @@ def logs_configurations():
         return jsonify(data), 200
     except Exception as e:
         log.error("Failed to fetch configuration logs: %s", e)
-        return jsonify(error='database_unavailable', detail=str(e)), 503
+        return jsonify(error='database_unavailable', detail='Database operation failed'), 503
 
 @api.get('/logs/faults')
 def logs_faults():
@@ -788,7 +806,7 @@ def logs_faults():
         return jsonify(data), 200
     except Exception as e:
         log.error("Failed to fetch fault logs: %s", e)
-        return jsonify(error='database_unavailable', detail=str(e)), 503
+        return jsonify(error='database_unavailable', detail='Database operation failed'), 503
 
 @api.get('/logs/system-events')
 def logs_system_events():
@@ -802,7 +820,7 @@ def logs_system_events():
         return jsonify(data), 200
     except Exception as e:
         log.error("Failed to fetch system events: %s", e)
-        return jsonify(error='database_unavailable', detail=str(e)), 503
+        return jsonify(error='database_unavailable', detail='Database operation failed'), 503
 
 @api.get('/logs/requests/export.csv')
 def export_request_logs_csv():
@@ -861,14 +879,16 @@ def export_request_logs_csv():
         )
     except Exception as e:
         log.error("Failed to export CSV: %s", e)
-        return jsonify(error='database_unavailable', detail=str(e)), 503
+        return jsonify(error='database_unavailable', detail='Database operation failed'), 503
 
 @api.post('/logs/cleanup')
 def logs_cleanup():
+    if os.getenv('PUBLIC_DEMO', 'false') == 'true':
+        return jsonify(error='operator_cleanup_only'), 403
     retention_hours = int(current_app.config.get('LOG_RETENTION_HOURS', 24))
     try:
         res = cleanup_expired_sessions(retention_hours=retention_hours)
         return jsonify(res), 200
     except Exception as e:
         log.error("Failed to run logs cleanup: %s", e)
-        return jsonify(error='database_unavailable', detail=str(e)), 503
+        return jsonify(error='database_unavailable', detail='Database operation failed'), 503

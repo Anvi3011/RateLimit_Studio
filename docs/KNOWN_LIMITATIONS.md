@@ -1,3 +1,5 @@
+> For the current Phase 2 public-mode limits, commit/ACK repair and free-service behavior, see [PUBLIC_DEPLOYMENT.md](PUBLIC_DEPLOYMENT.md). Earlier measured results below are historical and are not cloud verification.
+
 # Readiness, limitations, and verification record
 
 ## Implemented and locally verified in this hardening pass

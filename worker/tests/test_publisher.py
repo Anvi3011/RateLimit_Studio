@@ -102,3 +102,23 @@ def test_pika_successful_confirm_with_none_return_is_accepted(monkeypatch):
     assert channel.confirmed
     assert channel.message['mandatory'] is True
     assert channel.message['properties'].message_id == 'confirm-none'
+
+
+def test_restart_waits_for_predecessor_lease_without_crash_loop(monkeypatch):
+    from unittest.mock import Mock
+    r = Mock()
+    lease = r.lock.return_value
+    lease.acquire.side_effect = [False, True]
+    monkeypatch.setattr(publisher.redis.Redis, 'from_url', lambda *_args, **_kwargs: r)
+    monkeypatch.setattr(publisher, 'pause', lambda *_: None)
+    recovery = Mock()
+    monkeypatch.setattr(publisher, 'recover_inflight', recovery)
+    monkeypatch.setattr(publisher, 'stopping', False)
+    def stop_after_one_wait(*_args, **_kwargs):
+        publisher.stopping = True
+        return None
+    r.brpoplpush.side_effect = stop_after_one_wait
+    publisher.run()
+    assert lease.acquire.call_count == 2
+    recovery.assert_called_once()
+    lease.release.assert_called_once()

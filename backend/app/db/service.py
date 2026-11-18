@@ -43,7 +43,7 @@ def touch_session(session_id, retention_hours=24, db_session=None):
         return ds
     except Exception as e:
         session.rollback()
-        logger.warning("touch_session failed: %s", e)
+        logger.warning("Database operation failed (%s)", type(e).__name__)
         return None
     finally:
         if close:
@@ -80,7 +80,7 @@ def log_configuration_change(session_id, prev_alg, new_alg, prev_cfg, new_cfg, s
         return entry.to_dict()
     except Exception as e:
         session.rollback()
-        logger.error("log_configuration_change failed: %s", e)
+        logger.error("Database operation failed (%s)", type(e).__name__)
         return None
     finally:
         if close:
@@ -118,7 +118,7 @@ def log_fault_injection(session_id, fault_type, component, duration_seconds=60, 
         return entry.to_dict()
     except Exception as e:
         session.rollback()
-        logger.error("log_fault_injection failed: %s", e)
+        logger.error("Database operation failed (%s)", type(e).__name__)
         return None
     finally:
         if close:
@@ -156,7 +156,7 @@ def log_fault_recovery(session_id, fault_type=None, recovery_status='MANUAL_RECO
         return len(active_faults)
     except Exception as e:
         session.rollback()
-        logger.error("log_fault_recovery failed: %s", e)
+        logger.error("Database operation failed (%s)", type(e).__name__)
         return 0
     finally:
         if close:
@@ -182,7 +182,7 @@ def log_system_event(event_type, component, severity, message, session_id=None, 
         return event.to_dict()
     except Exception as e:
         session.rollback()
-        logger.error("log_system_event failed: %s", e)
+        logger.error("Database operation failed (%s)", type(e).__name__)
         return None
     finally:
         if close:
@@ -221,15 +221,8 @@ def get_logs_summary(session_id, db_session=None):
             'total_fault_simulations': faults_count
         }
     except Exception as e:
-        logger.error("get_logs_summary failed: %s", e)
-        return {
-            'total_requests': 0,
-            'allowed_requests': 0,
-            'rejected_requests': 0,
-            'failed_operations': 0,
-            'total_config_changes': 0,
-            'total_fault_simulations': 0
-        }
+        logger.error("Database read failed (%s)", type(e).__name__)
+        raise
     finally:
         if close:
             session.close()
@@ -281,8 +274,8 @@ def get_request_logs(session_id, filters=None, page=1, page_size=50, db_session=
             'page_size': page_size
         }
     except Exception as e:
-        logger.error("get_request_logs failed: %s", e)
-        return {'items': [], 'total': 0, 'page': page, 'page_size': page_size}
+        logger.error("Database read failed (%s)", type(e).__name__)
+        raise
     finally:
         if close:
             session.close()
@@ -297,8 +290,8 @@ def get_request_log_by_id(session_id, request_id, db_session=None):
         ).first()
         return row.to_dict() if row else None
     except Exception as e:
-        logger.error("get_request_log_by_id failed: %s", e)
-        return None
+        logger.error("Database read failed (%s)", type(e).__name__)
+        raise
     finally:
         if close:
             session.close()
@@ -319,8 +312,8 @@ def get_configuration_logs(session_id, page=1, page_size=50, db_session=None):
             'page_size': page_size
         }
     except Exception as e:
-        logger.error("get_configuration_logs failed: %s", e)
-        return {'items': [], 'total': 0, 'page': page, 'page_size': page_size}
+        logger.error("Database read failed (%s)", type(e).__name__)
+        raise
     finally:
         if close:
             session.close()
@@ -341,8 +334,8 @@ def get_fault_logs(session_id, page=1, page_size=50, db_session=None):
             'page_size': page_size
         }
     except Exception as e:
-        logger.error("get_fault_logs failed: %s", e)
-        return {'items': [], 'total': 0, 'page': page, 'page_size': page_size}
+        logger.error("Database read failed (%s)", type(e).__name__)
+        raise
     finally:
         if close:
             session.close()
@@ -370,8 +363,8 @@ def get_system_events(session_id=None, severity=None, component=None, page=1, pa
             'page_size': page_size
         }
     except Exception as e:
-        logger.error("get_system_events failed: %s", e)
-        return {'items': [], 'total': 0, 'page': page, 'page_size': page_size}
+        logger.error("Database read failed (%s)", type(e).__name__)
+        raise
     finally:
         if close:
             session.close()
@@ -405,7 +398,7 @@ def cleanup_expired_sessions(retention_hours=24, db_session=None):
         }
     except Exception as e:
         session.rollback()
-        logger.error("cleanup_expired_sessions failed: %s", e)
+        logger.error("Database operation failed (%s)", type(e).__name__)
         return {'expired_sessions_purged': 0, 'logs_purged': 0, 'error': str(e)}
     finally:
         if close:

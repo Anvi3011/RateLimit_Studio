@@ -1,3 +1,42 @@
+## Phase 2 independent deployment validation
+
+Phase 2 uses the isolated unit suite and a disposable local integration project. Never aim these tests at a production Redis/database. The React source, CSS, Lua decision scripts and base Compose file are checked against Git HEAD separately.
+
+Install test-only dependencies with `python -m pip install -r deployment/tests/requirements.txt`. In PowerShell at the repository root:
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH="$PWD/backend;$PWD/worker"
+$env:DATABASE_URL='sqlite:///:memory:'
+$env:REDIS_URL='redis://127.0.0.1:1/0'
+python -m pytest -q -p no:cacheprovider backend/tests worker/tests deployment/tests
+```
+
+The unavailable Redis URL deliberately selects fake Redis for isolated tests. SQLite is only a test database; deployed modes require PostgreSQL. Lua support is installed by the test requirements. The added cases cover commit-before-ACK, database session/commit errors, crash after commit, legacy markers, poison/dead-letter handling, consumer infrastructure requeue, readiness including PostgreSQL, cookie/CSRF/cache behavior, no public cleanup, supervisor restart/backoff/shutdown and free-only manifests.
+
+The real local check uses PostgreSQL 16, Redis 7.4, RabbitMQ 4 and the same combined Docker image intended for Render. It creates only a separate test Compose project; ensure that project name is unused before starting. Its data is disposable test data, not any existing database. The configuration does not load the local `.env`.
+
+```sh
+docker compose -p ratelimit-phase2-isolated -f deployment/tests/compose.integration.yml build demo
+docker compose -p ratelimit-phase2-isolated -f deployment/tests/compose.integration.yml run --rm checks
+```
+
+The integration script verifies both actual Lua algorithms, 200/429 decisions, PostgreSQL history, session isolation, dashboard metrics/time series, broker redelivery, repair of a missing row with an old Redis marker, and concurrent PostgreSQL conflict handling. It also verifies transaction-scoped SQL timeouts for both database modules. Re-running creates new isolated visitor sessions rather than resetting tables.
+
+For browser verification, start the optional frontend in the same isolated project:
+
+```sh
+docker compose -p ratelimit-phase2-isolated -f deployment/tests/compose.integration.yml --profile browser up -d --build frontend
+```
+
+Set `PLAYWRIGHT_BASE_URL=http://127.0.0.1:18089`, run `npm ci` and `npm run test:e2e` from `frontend`. This runs the existing browser scenario with the unchanged UI. The test proxy rewrites its upstream to the combined runtime; the test allowlist explicitly includes this localhost port. No live environment is used.
+
+To test hard-kill recovery, pipe `deployment/tests/restart_check.py` to `docker compose ... exec -T demo python -` in this disposable project only. It kills the two child processes, requires replacement processes, waits for a new publisher lease (up to 150 seconds), and then checks readiness. Do not run that script on a live service. A killed publisher can require up to 120 seconds for lease expiry; a graceful exit releases its lease immediately.
+
+Stop and remove only this test project's containers/network with `docker compose -p ratelimit-phase2-isolated -f deployment/tests/compose.integration.yml --profile browser down`. Do not add a volume-removal flag. No existing local service or volume is part of this project. For prior runs that used image-generated anonymous volumes, leave those volumes intact as well.
+
+Production provider TLS, browser proxy cookies and actual Render sleep/wake require separately approved cloud smoke tests. Local integration is not evidence that those hosted paths have already been deployed or verified. See [PUBLIC_DEPLOYMENT.md](PUBLIC_DEPLOYMENT.md).
+
 # Local testing and verification
 
 ## Backend and publisher tests

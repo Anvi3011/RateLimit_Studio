@@ -1,6 +1,6 @@
 import os
 import logging
-from sqlalchemy import create_engine
+from sqlalchemy import event, create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base, scoped_session
 from sqlalchemy.pool import QueuePool, NullPool, StaticPool
 
@@ -12,6 +12,8 @@ _SessionFactory = None
 
 def get_database_url():
     url = os.getenv('DATABASE_URL')
+    if os.getenv('REQUIRE_POSTGRES', 'false').lower() == 'true' and (not url or not url.startswith(('postgresql://', 'postgres://'))):
+        raise RuntimeError('A PostgreSQL DATABASE_URL is required')
     if url:
         # Handle postgres:// vs postgresql:// for SQLAlchemy compatibility
         if url.startswith('postgres://'):
@@ -45,13 +47,20 @@ def get_engine(db_url=None):
                 max_overflow=int(os.getenv('DB_MAX_OVERFLOW', '20')),
                 pool_timeout=int(os.getenv('DB_POOL_TIMEOUT', '5')),
                 pool_recycle=int(os.getenv('DB_POOL_RECYCLE', '1800')),
+                connect_args={'connect_timeout': int(os.getenv('DB_CONNECT_TIMEOUT', '5')), 'keepalives': 1, 'keepalives_idle': 30, 'keepalives_interval': 10, 'keepalives_count': 3},
                 pool_pre_ping=True
             )
+        if not url.startswith('sqlite'):
+            # Transaction-local settings work with Neon's PgBouncer pooler;
+            # startup `options=-c statement_timeout=...` is unsupported there.
+            @event.listens_for(engine, 'begin')
+            def transaction_limits(conn):
+                conn.exec_driver_sql('SET LOCAL statement_timeout = 10000')
         if db_url is None:
             _engine = engine
         return engine
     except Exception as e:
-        logger.error("Failed to create database engine: %s", e)
+        logger.error("Database engine configuration failed (%s)", type(e).__name__)
         raise
 
 def get_session_factory(engine=None):
