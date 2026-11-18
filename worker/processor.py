@@ -20,13 +20,14 @@ def save_to_db(event, db_session=None):
         req_ts = parse_dt(event.get('request_timestamp') or event.get('timestamp')) or datetime.now(timezone.utc)
         resp_ts = parse_dt(event.get('response_timestamp'))
 
-        decision_raw = event.get('decision', 'unknown')
-        if str(decision_raw).lower() in ('accepted', 'allowed'):
+        decision_raw = str(event.get('decision') or event.get('rate_limit_decision') or '').lower()
+        status = int(event.get('status', event.get('response_status', 200)))
+        if status == 200 and decision_raw in ('accepted', 'allowed'):
             decision = 'ALLOWED'
-        elif str(decision_raw).lower() in ('error', '503'):
-            decision = 'ERROR'
-        else:
+        elif status == 429 and decision_raw == 'rejected':
             decision = 'REJECTED'
+        else:
+            decision = 'ERROR'
 
         log_entry = RequestLog(
             request_id=req_id,
@@ -38,7 +39,7 @@ def save_to_db(event, db_session=None):
             http_method=str(event.get('http_method', 'POST'))[:10],
             request_timestamp=req_ts,
             response_timestamp=resp_ts,
-            response_status=int(event.get('status', 200)),
+            response_status=status,
             rate_limit_decision=decision,
             rejection_reason=event.get('reason'),
             request_processing_time_ms=float(event.get('latency_ms', 0.0)),

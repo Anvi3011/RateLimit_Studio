@@ -117,3 +117,29 @@ test('applying one visitor configuration cannot change another visitor policy', 
     await second.close();
   }
 });
+
+test('waits for the session cookie, preserves the active policy through unsaved edits and refresh', async ({ page }) => {
+  let sessionFinished = false;
+  const preSession = [];
+  await page.route('**/api/session', async (route) => {
+    const response = await route.fetch();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    sessionFinished = true;
+    await route.fulfill({ response });
+  }, { times: 1 });
+  page.on('request', (req) => {
+    const path = new URL(req.url()).pathname;
+    if (!sessionFinished && path.startsWith('/api/') && path !== '/api/session') preSession.push(path);
+  });
+  await configuration(page);
+  expect(preSession).toEqual([]);
+  const algorithm = page.locator('select').filter({ has: page.locator('option[value="token_bucket"]') });
+  await algorithm.selectOption('sliding_window');
+  await expect(page.getByText('Unsaved edits', { exact: true })).toBeVisible();
+  await expect(page.getByText(/^Active policy: Token Bucket/)).toBeVisible();
+  await algorithm.selectOption('token_bucket');
+  await expect(page.getByText('Showing active policy', { exact: true })).toBeVisible();
+  const backendSession = (await (await page.request.get('/api/session')).json()).session_id;
+  await page.reload();
+  expect((await (await page.request.get('/api/config')).json()).policy_id).toBe(backendSession);
+});

@@ -202,10 +202,23 @@ async function call(path, opts = {}) {
     const err = new Error(errorMsg);
     err.status = r.status;
     err.code = d.error;
+    if (path === '/health' && d.api) err.health = d;
     throw err;
   }
 
+  if (path === '/config' && r.headers.get('X-Configuration-Audit') === 'unavailable') {
+    return { ...d, auditUnavailable: true };
+  }
   return d;
+}
+
+function algorithmLabel(value) {
+  return { token_bucket: 'Token Bucket', sliding_window: 'Sliding Window' }[value] || value || 'Unknown';
+}
+
+function matchesPolicy(draft, saved) {
+  return ['algorithm', 'endpoint', 'identity_strategy'].every((key) => draft[key] === saved[key])
+    && CONFIG_NUMBERS.every(([, key]) => draft[key] !== '' && Number(draft[key]) === saved[key]);
 }
 
 function App() {
@@ -215,9 +228,13 @@ function App() {
   const [cfg, setCfg] = useState({});
   const [configReady, setConfigReady] = useState(false);
   const [appliedCfg, setAppliedCfg] = useState(null);
-  const [dirty, setDirty] = useState(false);
+  const dirty = appliedCfg !== null && !matchesPolicy(cfg, appliedCfg);
+  const [refreshError, setRefreshError] = useState('');
+  const [logsError, setLogsError] = useState('');
   const [saving, setSaving] = useState(false);
   const [rows, setRows] = useState([]);
+  const [inspectorDecision, setInspectorDecision] = useState('all');
+  const [inspectorClient, setInspectorClient] = useState('');
   const [faults, setFaults] = useState({});
   const [faultTtl, setFaultTtl] = useState({});
   const [faultDuration, setFaultDuration] = useState(60);
@@ -225,12 +242,13 @@ function App() {
   const [msg, setMsg] = useState('');
   const [currentSession, setCurrentSession] = useState(null);
   const [trafficCount, setTrafficCount] = useState(25);
-  const [trafficRps, setTrafficRps] = useState(100);
+  const [trafficRps, setTrafficRps] = useState(10);
   const [trafficRunning, setTrafficRunning] = useState(false);
   const [trafficProgress, setTrafficProgress] = useState(null);
   const trafficRun = useRef(null);
   useEffect(() => () => trafficRun.current?.abort(), []);
-  const configValid = CONFIG_NUMBERS.every(([, key, , max]) => validInteger(cfg[key], 1, max));
+  const configValid = Boolean(cfg.endpoint?.trim())
+    && CONFIG_NUMBERS.every(([, key, , max]) => validInteger(cfg[key], 1, max));
   const trafficValid = validInteger(trafficCount, 1, TRAFFIC_LIMITS.maxCount)
     && validInteger(trafficRps, 1, 200);
 
@@ -269,6 +287,9 @@ function App() {
   const [showWelcome, setShowWelcome] = useState(false);
 
   const formDirty = useRef(false);
+  const refreshRunning = useRef(false);
+  const sessionStarted = useRef(false);
+  const logRequest = useRef(null);
   const configRevision = useRef(0);
   const tabs = [
     ['Overview', Activity],
@@ -278,17 +299,6 @@ function App() {
     ['Fault Injection', TriangleAlert],
     ['Architecture', Waypoints]
   ];
-
-  // Initialize session
-  useEffect(() => {
-    call('/session')
-      .then((res) => {
-        if (res.session_id) {
-          setCurrentSession(res.session_id);
-        }
-      })
-      .catch(() => { });
-  }, []);
 
   // Check first-time user for welcome tour
   useEffect(() => {
@@ -317,96 +327,130 @@ function App() {
   }, [activeInfo, confirmDialog, showHelpMenu, tourStep, showWelcome, selectedReq]);
 
   const refreshLogs = useCallback(async () => {
+    if (!currentSession) return;
+    logRequest.current?.abort();
+    const controller = new AbortController();
+    logRequest.current = controller;
+    const read = (path) => call(path, { signal: controller.signal });
     setLoadingLogs(true);
     try {
-      const [sum, reqs] = await Promise.all([
-        call('/logs/summary'),
-        call(`/logs/requests?page=${reqPage}&page_size=${reqPageSize}&algorithm=${filterAlg}&decision=${filterDecision}&client_id=${encodeURIComponent(filterClient)}&endpoint=${encodeURIComponent(filterEndpoint)}&request_id=${encodeURIComponent(filterReqId)}&status=${filterStatus}`)
-      ]);
+      const paths = {
+        requests: '/logs/requests?' + new URLSearchParams({
+          page: reqPage, page_size: reqPageSize, algorithm: filterAlg, decision: filterDecision,
+          client_id: filterClient, endpoint: filterEndpoint, request_id: filterReqId, status: filterStatus
+        }),
+        configurations: '/logs/configurations?page=1&page_size=50',
+        faults: '/logs/faults?page=1&page_size=50',
+        events: '/logs/system-events?page=1&page_size=50&severity=' + encodeURIComponent(filterSeverity)
+      };
+      const [sum, data] = await Promise.all([read('/logs/summary'), read(paths[logsSubtab])]);
+      if (controller.signal.aborted) return;
       setLogsSummary(sum);
-      setReqLogs(reqs.items || []);
-      setReqTotal(reqs.total || 0);
-
-      if (logsSubtab === 'configurations') {
-        const cfgs = await call('/logs/configurations?page=1&page_size=50');
-        setCfgLogs(cfgs.items || []);
+      const items = data.items || [];
+      if (logsSubtab === 'requests') {
+        setReqLogs(items);
+        setReqTotal(data.total || 0);
+      } else if (logsSubtab === 'configurations') {
+        setCfgLogs(items);
       } else if (logsSubtab === 'faults') {
-        const flts = await call('/logs/faults?page=1&page_size=50');
-        setFaultLogs(flts.items || []);
-      } else if (logsSubtab === 'events') {
-        const evts = await call(`/logs/system-events?page=1&page_size=50&severity=${filterSeverity}`);
-        setSysEvents(evts.items || []);
+        setFaultLogs(items);
+      } else {
+        setSysEvents(items);
       }
+      setLogsError('');
     } catch (e) {
-      // Degraded log fetch
+      if (!controller.signal.aborted) setLogsError('Could not refresh PostgreSQL logs: ' + e.message);
     } finally {
-      setLoadingLogs(false);
+      if (logRequest.current === controller) {
+        logRequest.current = null;
+        if (!controller.signal.aborted) setLoadingLogs(false);
+      }
     }
-  }, [reqPage, reqPageSize, filterAlg, filterDecision, filterClient, filterEndpoint, filterReqId, filterStatus, filterSeverity, logsSubtab]);
+  }, [currentSession, reqPage, reqPageSize, filterAlg, filterDecision, filterClient, filterEndpoint, filterReqId, filterStatus, filterSeverity, logsSubtab]);
 
   async function refresh() {
+    if (refreshRunning.current) return;
+    refreshRunning.current = true;
     const revision = configRevision.current;
     try {
-      const [a, b, c, d, e, f] = await Promise.all([
-        call('/metrics'),
-        call('/health'),
-        call('/config'),
-        call('/history?page_size=50'),
-        call('/faults'),
-        call('/metrics/timeseries?seconds=300&bucket_seconds=5')
-      ]);
-      setM(a);
-      setH(b);
-      if (revision === configRevision.current) {
-        setAppliedCfg(c);
-        setConfigReady(true);
-        if (!formDirty.current) setCfg(c);
+      if (!sessionStarted.current) {
+        const session = await call('/session');
+        if (!session.session_id) throw new Error('Demo session unavailable');
+        sessionStarted.current = true;
+        setCurrentSession(session.session_id);
       }
-      setRows(d.items || []);
-      setFaults(e.active || {});
-      setFaultTtl(e.ttl_seconds || {});
-      setSeries(f.points || []);
+      const feeds = [
+        ['/config', (policy) => {
+          if (revision !== configRevision.current || revision % 2 !== 0) return;
+          setAppliedCfg(policy);
+          setConfigReady(true);
+          if (!formDirty.current) setCfg(policy);
+        }],
+        ['/metrics', setM],
+        ['/health', setH],
+        ['/history?page_size=50', (data) => setRows(data.items || [])],
+        ['/faults', (data) => {
+          setFaults(data.active || {});
+          setFaultTtl(data.ttl_seconds || {});
+        }],
+        ['/metrics/timeseries?seconds=300&bucket_seconds=5', (data) => setSeries(data.points || [])]
+      ];
+      const outcomes = await Promise.allSettled(feeds.map(async ([path, update]) => {
+        try {
+          update(await call(path));
+        } catch (error) {
+          if (path === '/health' && error.health) update(error.health);
+          else throw error;
+        }
+      }));
+      const failed = feeds.filter((_, index) => outcomes[index].status === 'rejected').map(([path]) => path.split('?')[0]);
+      setRefreshError(failed.length ? 'Could not refresh ' + failed.join(', ') : '');
     } catch (e) {
-      setMsg(e.message);
+      setRefreshError(e.message);
+    } finally {
+      refreshRunning.current = false;
     }
   }
 
   useEffect(() => {
     refresh();
-    const x = setInterval(refresh, 3000);
+    const x = setInterval(refresh, 5000);
     return () => clearInterval(x);
   }, []);
 
   useEffect(() => {
-    if (tab === 'Logs & Analytics') {
-      refreshLogs();
-      const lx = setInterval(refreshLogs, 6000);
-      return () => clearInterval(lx);
-    }
-  }, [tab, refreshLogs]);
+    if (tab !== 'Logs & Analytics' || !currentSession) return;
+    refreshLogs();
+    const timer = setInterval(() => {
+      if (!logRequest.current) refreshLogs();
+    }, 6000);
+    return () => {
+      clearInterval(timer);
+      logRequest.current?.abort();
+    };
+  }, [tab, refreshLogs, currentSession]);
 
   function editConfig(next) {
-    formDirty.current = true;
-    setDirty(true);
+    formDirty.current = !matchesPolicy(next, appliedCfg);
     setCfg(next);
   }
 
-  async function traffic(n, client = 'demo-client', endpoint = (appliedCfg?.endpoint || cfg.endpoint || '/api/demo'), rate = 100) {
-    if (trafficRun.current || saving) return;
+  async function traffic(n, client = 'demo-client', rate = 10) {
+    if (trafficRun.current || saving || !configReady) return;
     const controller = new AbortController();
     trafficRun.current = controller;
     setTrafficRunning(true);
-    setTrafficProgress({ targetRps: Number(rate), accepted: 0, rejected: 0, errors: 0 });
+    setMsg('');
+    setTrafficProgress({ requested: Number(n), targetRps: Number(rate), accepted: 0, rejected: 0, errors: 0 });
     try {
       const result = await runTraffic({ count: Number(n), rps: Number(rate), clientId: client,
-        endpoint, signal: controller.signal, onProgress: setTrafficProgress });
+        signal: controller.signal, onProgress: setTrafficProgress });
       setTrafficProgress(result);
-      const stopped = result.stopReason ? ` (${result.stopReason.replaceAll('_', ' ')})` : '';
+      const stopped = result.stopReason ? ` · stopped: ${result.stopReason.replaceAll('_', ' ')}` : ' · completed';
       const unknown = result.unknown ? `; ${result.unknown} outcomes unknown; check history before retrying` : '';
       const warnings = result.enqueueWarnings ? `; ${result.enqueueWarnings} logging enqueue warnings` : '';
       setMsg(`Offered ${result.attempted}: ${result.accepted} accepted, ${result.rejected} rejected, ${result.errors} errors${stopped}. Target ${result.targetRps} RPS; observed ${result.achievedRps.toFixed(1)} requests/sec${unknown}${warnings}`);
       refresh();
-      if (tab === 'Logs & Analytics') refreshLogs();
     } catch (e) {
       setMsg(e.message);
     } finally {
@@ -416,25 +460,24 @@ function App() {
   }
 
   async function save() {
-    if (!configValid || trafficRun.current) return;
+    if (!configValid || trafficRun.current || saving || !configReady) return;
     configRevision.current++;
     setSaving(true);
     try {
-      const saved = await call('/config', {
+      const { auditUnavailable, ...saved } = await call('/config', {
         method: 'PUT',
         body: JSON.stringify({ ...cfg, ...Object.fromEntries(
           CONFIG_NUMBERS.map(([, key]) => [key, Number(cfg[key])])) })
       });
-      configRevision.current++;
       setAppliedCfg(saved);
       setCfg(saved);
       formDirty.current = false;
-      setDirty(false);
-      setMsg('Policy saved and active');
+      setMsg(auditUnavailable ? 'Policy saved and active. Configuration history write failed.' : 'Policy saved and active');
       if (tab === 'Logs & Analytics') refreshLogs();
     } catch (e) {
       setMsg('Configuration was not saved: ' + e.message);
     } finally {
+      configRevision.current++;
       setSaving(false);
     }
   }
@@ -504,7 +547,10 @@ function App() {
     }
   }
 
-  const activeCfg = appliedCfg || cfg;
+  const activeCfg = appliedCfg || {};
+  const visibleRows = rows.filter((row) =>
+    (inspectorDecision === 'all' || inspectorDecision === row.decision)
+    && row.client_id.toLowerCase().includes(inspectorClient.toLowerCase()));
   const card = (label, value, detail = '', color = '') => (
     <div className="metric" key={label}>
       <span>{label}</span>
@@ -588,10 +634,12 @@ function App() {
 
         {msg && <div className="notice" onClick={() => setMsg('')}>{msg}<b> ×</b></div>}
 
+        {refreshError && <p className="control-error" role="status">{refreshError}</p>}
         {trafficRunning && (
           <div className="traffic-progress" role="status">
-            <span>Generating traffic: {trafficProgress ? trafficProgress.accepted + trafficProgress.rejected + trafficProgress.errors : 0} responses/outcomes recorded.
-              {' '}Target {trafficProgress?.targetRps || trafficRps} RPS; at most {TRAFFIC_LIMITS.maxInFlight} requests in flight.</span>
+            <span>Submitted {trafficProgress?.attempted ?? 0} of {trafficProgress?.requested ?? 0} requests.
+              {' '}Target {trafficProgress?.targetRps || trafficRps} RPS · measured {(trafficProgress?.achievedRps ?? 0).toFixed(1)} RPS.
+              {' '}{trafficProgress?.accepted ?? 0} accepted · {trafficProgress?.rejected ?? 0} rejected · {trafficProgress?.errors ?? 0} failed.</span>
             <button className="secondary" onClick={() => trafficRun.current?.abort()}>Cancel traffic</button>
           </div>
         )}
@@ -608,7 +656,7 @@ function App() {
               <div className="buttons">
                 <button
                   className="secondary"
-                  disabled={trafficRunning || saving}
+                  disabled={trafficRunning || saving || !configReady}
                   onClick={() => {
                     if (navigator.webdriver) {
                       traffic(10);
@@ -626,7 +674,7 @@ function App() {
                 </button>
                 <button
                   className="primary"
-                  disabled={trafficRunning || saving}
+                  disabled={trafficRunning || saving || !configReady}
                   onClick={() => {
                     if (navigator.webdriver) {
                       traffic(100);
@@ -736,14 +784,18 @@ function App() {
           <div className="panel config">
             <h2>Rate limit policy</h2>
             <p>
-              Changes are applied to your isolated demo session.{' '}
               {!configReady ? 'Loading saved configuration…' : dirty ? 'Unsaved edits' : 'Showing active policy'}
             </p>
+            {appliedCfg && <p>
+              Active policy: {algorithmLabel(appliedCfg.algorithm)} at {appliedCfg.rate} RPS with{' '}
+              {appliedCfg.algorithm === 'token_bucket' ? `burst ${appliedCfg.burst}` : `a ${appliedCfg.window_seconds}s window`}.
+              {' '}{appliedCfg.endpoint} uses {appliedCfg.identity_strategy === 'ip' ? 'remote IP' : 'client ID'}.
+            </p>}
 
             <label>
               <span>Algorithm <InfoBtn term={cfg.algorithm === 'token_bucket' ? 'Token Bucket' : 'Sliding Window'} /></span>
               <select
-                disabled={!configReady}
+                disabled={!configReady || saving}
                 value={cfg.algorithm}
                 onChange={(e) => {
                   const newAlg = e.target.value;
@@ -767,22 +819,22 @@ function App() {
                 <NumberSlider key={key} id={`config-${key}`} label={label}
                   info={<InfoBtn term={label} />} value={cfg[key] ?? ''}
                   max={sliderMax} inputMax={backendMax} fallback={appliedCfg?.[key] || 1}
-                  disabled={!configReady || (key === 'burst' && cfg.algorithm === 'sliding_window')
+                  disabled={!configReady || saving || (key === 'burst' && cfg.algorithm === 'sliding_window')
                     || (key === 'window_seconds' && cfg.algorithm === 'token_bucket')}
                   onChange={(value) => editConfig({ ...cfg, [key]: value })} />
               ))}
               <label>
                 <span>API endpoint <InfoBtn term="API endpoint" /></span>
                 <input
-                  disabled={!configReady}
-                  value={cfg.endpoint || '/api/demo'}
+                  disabled={!configReady || saving}
+                  value={cfg.endpoint ?? ''} maxLength={256}
                   onChange={(e) => editConfig({ ...cfg, endpoint: e.target.value })}
                 />
               </label>
               <label>
                 <span>Client identity <InfoBtn term="Client identity" /></span>
                 <select
-                  disabled={!configReady}
+                  disabled={!configReady || saving}
                   value={cfg.identity_strategy}
                   onChange={(e) => editConfig({ ...cfg, identity_strategy: e.target.value })}
                 >
@@ -810,12 +862,8 @@ function App() {
                 <span>Client identifier <InfoBtn term="X-Client-ID" /></span>
                 <input id="traffic-client" defaultValue="demo-client" />
               </label>
-              <label>
-                <span>API endpoint <InfoBtn term="API endpoint" /></span>
-                <input id="traffic-endpoint" defaultValue={cfg.endpoint || '/api/demo'} />
-              </label>
               <NumberSlider id="traffic-rate" label="Incoming requests / second" info={<InfoBtn term="Request Rate" />}
-                value={trafficRps} onChange={setTrafficRps} max={200} fallback={100}
+                value={trafficRps} onChange={setTrafficRps} max={200} fallback={10}
                 disabled={trafficRunning} note={`Target: ${trafficRps || '--'} RPS; actual throughput may be lower.`} />
             </div>
             <button
@@ -824,16 +872,15 @@ function App() {
               onClick={() => {
                 const count = Number(trafficCount);
                 const client = document.getElementById('traffic-client')?.value || 'demo-client';
-                const ep = document.getElementById('traffic-endpoint')?.value || '/api/demo';
                 const rate = Number(trafficRps);
 
                 if (navigator.webdriver) {
-                  traffic(count, client, ep, rate);
+                  traffic(count, client, rate);
                 } else {
                   setConfirmDialog({
                     title: 'Generate Traffic',
                     message: 'This will send simulated requests to the rate limiter. You can inspect which requests are allowed or rejected.',
-                    onConfirm: () => traffic(count, client, ep, rate),
+                    onConfirm: () => traffic(count, client, rate),
                     confirmText: 'Generate Traffic'
                   });
                 }
@@ -853,19 +900,19 @@ function App() {
             <div className="tablehead">
               <div>
                 <h2>Request decisions</h2>
-                <p>Latest in-memory edge records.</p>
+                <p>Latest 50 Redis decision records for this session.</p>
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <span style={{ fontSize: '11px', color: '#998f9e' }}>Filter:</span>
-                <select
-                  onChange={async (e) => {
-                    const x = await call('/history?decision=' + e.target.value + '&page_size=50');
-                    setRows(x.items || []);
-                  }}
-                >
+                <input aria-label="Filter inspector by client ID" placeholder="Client ID" value={inspectorClient}
+                  onChange={(e) => setInspectorClient(e.target.value)} />
+                <select aria-label="Filter inspector by decision" value={inspectorDecision}
+                  onChange={(e) => setInspectorDecision(e.target.value)}>
+
                   <option value="all">All decisions</option>
                   <option value="accepted">Accepted</option>
                   <option value="rejected">Rejected</option>
+                  <option value="error">Failed</option>
                 </select>
               </div>
             </div>
@@ -882,7 +929,7 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((x) => (
+                  {visibleRows.map((x) => (
                     <tr key={x.request_id}>
                       <td>
                         <code>{x.request_id.slice(0, 8)}</code>
@@ -893,20 +940,21 @@ function App() {
                         {x.edge_id}
                         <small>{x.endpoint}</small>
                       </td>
-                      <td>{x.algorithm}</td>
+                      <td>{algorithmLabel(x.algorithm)}</td>
                       <td>
-                        <span className={'tag ' + (x.decision === 'accepted' ? 'green' : 'red')}>
+                        <span className={'tag ' + (x.decision === 'accepted' ? 'green' : x.decision === 'error' ? 'amber' : 'red')}>
                           {x.status} · {x.decision}
                         </span>
                         {x.reason && <small>{x.reason}</small>}
+                        {x.event_publish_error && <small>{x.event_publish_error}</small>}
                       </td>
                       <td>{x.latency_ms} ms</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {!rows.length && (
-                <div className="empty">No decisions yet. Generate traffic to populate the inspector.</div>
+              {!visibleRows.length && (
+                <div className="empty">No recent decisions match these filters.</div>
               )}
             </div>
           </div>
@@ -915,10 +963,11 @@ function App() {
         {/* LOGS & ANALYTICS TAB */}
         {tab === 'Logs & Analytics' && (
           <>
+            {logsError && <p className="control-error" role="status">{logsError}</p>}
             <div className="session-banner">
               <Database size={16} color="#d4b4f6" />
               <div>
-                <b>Persistent PostgreSQL Audit</b> — Logs are stored persistently in the database and are isolated to your demo session.
+                <b>Persistent PostgreSQL Audit</b> — Records appear after the asynchronous worker commits them.
               </div>
               <div className="session-badge">
                 ID: {currentSession ? `${currentSession.slice(0, 10)}...` : 'active'}
@@ -940,25 +989,25 @@ function App() {
                 <div className="subtabs" style={{ marginBottom: 0, borderBottom: 0, paddingBottom: 0 }}>
                   <button
                     className={'subtab ' + (logsSubtab === 'requests' ? 'active' : '')}
-                    onClick={() => { setLogsSubtab('requests'); refreshLogs(); }}
+                    onClick={() => setLogsSubtab('requests')}
                   >
                     Request Logs ({reqTotal})
                   </button>
                   <button
                     className={'subtab ' + (logsSubtab === 'configurations' ? 'active' : '')}
-                    onClick={() => { setLogsSubtab('configurations'); refreshLogs(); }}
+                    onClick={() => setLogsSubtab('configurations')}
                   >
                     Configuration History
                   </button>
                   <button
                     className={'subtab ' + (logsSubtab === 'faults' ? 'active' : '')}
-                    onClick={() => { setLogsSubtab('faults'); refreshLogs(); }}
+                    onClick={() => setLogsSubtab('faults')}
                   >
                     Fault History
                   </button>
                   <button
                     className={'subtab ' + (logsSubtab === 'events' ? 'active' : '')}
-                    onClick={() => { setLogsSubtab('events'); refreshLogs(); }}
+                    onClick={() => setLogsSubtab('events')}
                   >
                     System Events
                   </button>
@@ -1075,7 +1124,7 @@ function App() {
                               <code>{r.request_id.slice(0, 8)}...</code>
                             </td>
                             <td>{r.client_id}</td>
-                            <td>{r.algorithm === 'token_bucket' ? 'Token Bucket' : 'Sliding Window'}</td>
+                            <td>{algorithmLabel(r.algorithm)}</td>
                             <td>{r.endpoint}</td>
                             <td><code>{r.http_method || 'POST'}</code></td>
                             <td>
@@ -1098,7 +1147,7 @@ function App() {
                   </div>
 
                   <div className="pagination-row">
-                    <span>Showing {(reqPage - 1) * reqPageSize + 1} to {Math.min(reqTotal, reqPage * reqPageSize)} of {reqTotal} persistent logs</span>
+                    <span>Showing {reqLogs.length ? (reqPage - 1) * reqPageSize + 1 : 0} to {Math.min(reqTotal, reqPage * reqPageSize)} of {reqTotal} persistent logs</span>
                     <div className="pagination-btns">
                       <button
                         className="secondary"
@@ -1139,8 +1188,8 @@ function App() {
                       {cfgLogs.map((c) => (
                         <tr key={c.id}>
                           <td>{c.changed_at ? new Date(c.changed_at).toLocaleString() : '—'}</td>
-                          <td>{c.previous_algorithm || 'initial'}</td>
-                          <td><b>{c.new_algorithm}</b></td>
+                          <td>{c.previous_algorithm ? algorithmLabel(c.previous_algorithm) : 'Initial'}</td>
+                          <td><b>{algorithmLabel(c.new_algorithm)}</b></td>
                           <td>
                             <small>
                               {c.previous_configuration ? `Rate: ${c.previous_configuration.rate}, Burst: ${c.previous_configuration.burst}` : 'None'}
@@ -1384,7 +1433,7 @@ function App() {
                 </div>
                 <div className="detail-cell">
                   <span>ALGORITHM <InfoBtn term="Token Bucket" /></span>
-                  <strong>{selectedReq.algorithm === 'token_bucket' ? 'Token Bucket' : 'Sliding Window'}</strong>
+                  <strong>{algorithmLabel(selectedReq.algorithm)}</strong>
                 </div>
                 <div className="detail-cell">
                   <span>DECISION & STATUS <InfoBtn term="Rate-limit decision" /></span>

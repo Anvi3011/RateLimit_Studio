@@ -48,12 +48,9 @@ def get_session_id():
 
 def config_value(session_id=None):
     sid = session_id or get_session_id()
-    try:
-        raw = store().get(f'ratelimit:config:{sid}')
-        if raw:
-            return json.loads(raw)
-    except Exception:
-        pass
+    raw = store().get(f'ratelimit:config:{sid}')
+    if raw:
+        return json.loads(raw)
     cfg = DEFAULT.copy()
     cfg['policy_id'] = sid
     return cfg
@@ -64,14 +61,16 @@ def active_faults(session_id=None):
     fault_names = ('redis_unavailable', 'rabbitmq_unavailable', 'worker_unavailable', 'api_degraded', 'network_timeout')
     try:
         r = store()
-        for name in fault_names:
-            key = f'ratelimit:fault:{sid}:{name}'
-            if r.exists(key):
-                if r.ttl(key) == -1:
-                    r.expire(key, 60)
+        with r.pipeline(transaction=False) as pipe:
+            for name in fault_names:
+                pipe.ttl(f'ratelimit:fault:{sid}:{name}')
+            pipe.get(f'ratelimit:fault:{sid}:latency_ms')
+            *ttls, raw = pipe.execute()
+        for name, ttl in zip(fault_names, ttls):
+            if ttl >= -1:
                 active[name] = True
-
-        raw = r.get(f'ratelimit:fault:{sid}:latency_ms')
+                if ttl == -1:
+                    r.expire(f'ratelimit:fault:{sid}:{name}', 60)
         if raw is not None:
             active['latency_ms'] = int(raw)
     except Exception:
@@ -85,27 +84,31 @@ def enqueue_event(event):
         1, OUTBOX_KEY, OUTBOX_CAPACITY, payload
     ))
 
-def validate_config(d, session_id=None):
+def validate_config(d, session_id=None, current=None):
     if not isinstance(d, dict):
         raise ValueError('JSON object required')
-    d_clean = {k: v for k, v in d.items() if k not in ('admin_token',)}
+    d_clean = {k: d[k] for k in DEFAULT if k in d and k != 'policy_id'}
     sid = session_id or get_session_id()
-    current = config_value(sid)
+    if current is None:
+        current = config_value(sid)
     c = {**current, **d_clean}
     c['policy_id'] = sid
     if c.get('algorithm') not in ('token_bucket', 'sliding_window'):
         raise ValueError('algorithm must be token_bucket or sliding_window')
     for k, lo, hi in [('rate', 1, 100000), ('burst', 1, 100000), ('window_seconds', 1, 3600), ('edge_nodes', 1, 100)]:
         try:
-            c[k] = int(c[k])
-        except (ValueError, TypeError):
+            value = c[k]
+            c[k] = int(value)
+            if isinstance(value, bool) or (isinstance(value, float) and value != c[k]):
+                raise ValueError()
+        except (ValueError, TypeError, OverflowError):
             raise ValueError(f'{k} must be an integer')
         if not lo <= c[k] <= hi:
             raise ValueError(f'{k} must be between {lo} and {hi}')
     if c.get('identity_strategy') not in ('header', 'ip'):
         raise ValueError('identity_strategy must be header or ip')
-    if not isinstance(c.get('endpoint', '/api/demo'), str) or len(c.get('endpoint', '/api/demo')) > 256:
-        raise ValueError('endpoint must be a string of at most 256 characters')
+    if not isinstance(c['endpoint'], str) or not c['endpoint'].strip() or len(c['endpoint']) > 256:
+        raise ValueError('endpoint must be a non-empty string of at most 256 characters')
     return c
 
 # =====================================================================
@@ -183,23 +186,23 @@ def get_config():
     sid = get_session_id()
     try:
         return jsonify(config_value(sid))
-    except Exception as e:
-        return jsonify(error='redis_unavailable', detail='Database operation failed'), 503
+    except Exception:
+        return jsonify(error='redis_unavailable'), 503
 
 @api.put('/config')
 def put_config():
     sid = get_session_id()
     try:
         prev = config_value(sid)
-        body = request.get_json(silent=True) or {}
-        c = validate_config(body, session_id=sid)
+        body = request.get_json(silent=True)
+        c = validate_config(body, session_id=sid, current=prev)
 
         # Persist in Redis
         store().set(f'ratelimit:config:{sid}', json.dumps(c), ex=86400)
 
         # Log to PostgreSQL
         try:
-            log_configuration_change(
+            audit = log_configuration_change(
                 session_id=sid,
                 prev_alg=prev.get('algorithm'),
                 new_alg=c.get('algorithm'),
@@ -208,13 +211,17 @@ def put_config():
                 status='APPLIED'
             )
         except Exception as exc:
-            log.warning("Could not persist configuration change log: %s", exc)
+            log.warning("Could not persist configuration change log (%s)", type(exc).__name__)
+            audit = None
 
-        return jsonify(c)
+        response = jsonify(c)
+        if not audit:
+            response.headers['X-Configuration-Audit'] = 'unavailable'
+        return response
     except ValueError as e:
-        return jsonify(error='invalid_config', detail='Database operation failed'), 400
+        return jsonify(error='invalid_config', detail=str(e)), 400
     except Exception as exc:
-        log.error("Failed to update config: %s", exc)
+        log.error("Failed to update config (%s)", type(exc).__name__)
         return jsonify(error='redis_unavailable'), 503
 
 # =====================================================================
@@ -224,9 +231,14 @@ def put_config():
 def test_request():
     sid = get_session_id()
     d = request.get_json(silent=True) or {}
-    c = config_value(sid)
+    policy_unavailable = False
+    try:
+        c = getattr(g, 'benchmark_policy', None) or config_value(sid)
+    except Exception:
+        c = {**DEFAULT, 'policy_id': sid}
+        policy_unavailable = True
     client_id = str((request.remote_addr if c.get('identity_strategy') == 'ip' else None) or d.get('client_id') or request.headers.get('X-Client-ID') or request.remote_addr or 'anonymous')[:128]
-    endpoint = str(d.get('endpoint') or '/api/demo')[:256]
+    endpoint = str(d.get('endpoint') or c['endpoint'])[:256]
     edge = str(d.get('edge_id') or ('edge-' + str(int(time.time() * 1000) % 3)))[:64]
     started = time.perf_counter()
     started_ts = time.time()
@@ -245,11 +257,13 @@ def test_request():
         time.sleep(min(2, faults['latency_ms'] / 1000))
 
     try:
+        if policy_unavailable:
+            raise ConnectionError('Saved policy unavailable')
         if faults.get('redis_unavailable'):
             raise ConnectionError('Redis fault injected')
         result = decide(client_id, endpoint, c, edge)
     except Exception as e:
-        error = str(e)
+        error = str(e) if isinstance(e, ConnectionError) else "Rate limiter unavailable"
         allowed = (current_app.config['FAIL_MODE'] == 'open')
         result = {'allowed': allowed, 'remaining': 0, 'retry_after': 1, 'redis_latency_ms': 0}
 
@@ -267,7 +281,7 @@ def test_request():
         'correlation_id': correlation_id,
         'demo_session_id': sid,
         'client_id': client_id,
-        'algorithm': c['algorithm'],
+        'algorithm': 'unknown' if policy_unavailable else c['algorithm'],
         'endpoint': endpoint,
         'http_method': 'POST',
         'request_timestamp': started_ts,
@@ -291,9 +305,18 @@ def test_request():
     if faults.get('rabbitmq_unavailable'):
         record['event_publish_error'] = 'RabbitMQ fault injected'
 
+    # Asynchronous persistence through RabbitMQ Outbox
+    if not faults.get('rabbitmq_unavailable'):
+        try:
+            if not enqueue_event(record):
+                record['event_publish_error'] = 'publisher_outbox_full'
+        except Exception as exc:
+            log.warning('outbox enqueue failed request_id=%s error=%s', rid, type(exc).__name__)
+            record['event_publish_error'] = 'outbox_unavailable'
+
     # Update session metrics in Redis (strictly isolated per session)
     try:
-        r = store()
+        r = store().pipeline()
         # Session metrics
         mkey = f'ratelimit:metrics:{sid}'
         r.hincrby(mkey, 'total', 1)
@@ -331,27 +354,14 @@ def test_request():
         # Global aggregate counter for system-level stats (no visitor records stored globally)
         r.hincrby('ratelimit:metrics', 'total', 1)
         r.hincrby('ratelimit:metrics', decision, 1)
+        if record.get('event_publish_error'):
+            for metrics_key in (mkey, 'ratelimit:metrics'):
+                r.hincrby(metrics_key, 'publish_failures', 1)
+                if record['event_publish_error'] == 'publisher_outbox_full':
+                    r.hincrby(metrics_key, 'outbox_overflow', 1)
+        r.execute()
     except Exception:
         pass
-
-    # Asynchronous persistence through RabbitMQ Outbox
-    if not faults.get('rabbitmq_unavailable'):
-        try:
-            if not enqueue_event(record):
-                record['event_publish_error'] = 'publisher_outbox_full'
-                store().hincrby(f'ratelimit:metrics:{sid}', 'outbox_overflow', 1)
-                store().hincrby(f'ratelimit:metrics:{sid}', 'publish_failures', 1)
-                store().hincrby('ratelimit:metrics', 'outbox_overflow', 1)
-                store().hincrby('ratelimit:metrics', 'publish_failures', 1)
-        except Exception as exc:
-            log.warning('outbox enqueue failed request_id=%s error=%s', rid, type(exc).__name__)
-            record['event_publish_error'] = 'outbox_unavailable'
-    else:
-        try:
-            store().hincrby(f'ratelimit:metrics:{sid}', 'publish_failures', 1)
-            store().hincrby('ratelimit:metrics', 'publish_failures', 1)
-        except Exception:
-            pass
 
     response = jsonify(record)
     response.status_code = status
@@ -384,7 +394,7 @@ def traffic():
     records = []
     start = time.monotonic()
     client_id = d.get('client_id', 'demo-client')
-    endpoint = d.get('endpoint', '/api/demo')
+    endpoint = d.get('endpoint')
 
     for i in range(count):
         with current_app.test_request_context(
@@ -437,7 +447,7 @@ def history():
         decision = request.args.get('decision')
         client_id = request.args.get('client_id', '').lower()
         endpoint = request.args.get('endpoint', '').lower()
-        if decision in ('accepted', 'rejected'):
+        if decision in ('accepted', 'rejected', 'error'):
             rows = [x for x in rows if x['decision'] == decision]
         if client_id:
             rows = [x for x in rows if client_id in x['client_id'].lower()]
@@ -475,7 +485,7 @@ def metrics():
         rejected = m.get('rejected', 0)
         errors = m.get('error', 0)
         decisions = accepted + rejected
-        depth = 0
+        depth = None
         try:
             import pika
             p = pika.URLParameters(os.getenv('RABBITMQ_URL', 'amqp://localhost:5672/%2F'))
@@ -483,8 +493,10 @@ def metrics():
             p.stack_timeout = 5
             p.blocked_connection_timeout = 3
             c = pika.BlockingConnection(p)
-            depth = c.channel().queue_declare('ratelimit.events', durable=True, passive=True).method.message_count
-            c.close()
+            try:
+                depth = c.channel().queue_declare('ratelimit.events', durable=True, passive=True).method.message_count
+            finally:
+                c.close()
         except Exception:
             pass
 
@@ -683,11 +695,14 @@ def benchmark():
     except (TypeError, ValueError):
         return jsonify(error='count must be an integer from 1 to 500'), 400
 
-    old = config_value(sid)
-    c = validate_config({'algorithm': alg}, session_id=sid)
-    store().set(f'ratelimit:config:{sid}', json.dumps(c), ex=86400)
+    try:
+        c = validate_config({'algorithm': alg}, session_id=sid)
+    except ValueError as exc:
+        return jsonify(error='invalid_config', detail=str(exc)), 400
+    except Exception:
+        return jsonify(error='redis_unavailable'), 503
     t = time.perf_counter()
-    accepted = 0
+    accepted = rejected = 0
     lat = []
 
     for i in range(count):
@@ -698,13 +713,14 @@ def benchmark():
         ):
             g.session_id = sid
             g.internal_traffic = True
+            g.benchmark_policy = c
             before = time.perf_counter()
             resp = test_request()
             lat.append((time.perf_counter() - before) * 1000)
-            accepted += (resp.status_code == 200)
+            accepted += resp.status_code == 200
+            rejected += resp.status_code == 429
 
     elapsed = time.perf_counter() - t
-    store().set(f'ratelimit:config:{sid}', json.dumps(old), ex=86400)
     lat.sort()
 
     report = {
@@ -714,7 +730,8 @@ def benchmark():
         'duration_seconds': round(elapsed, 3),
         'offered_rps': round(count / elapsed, 2),
         'accepted': accepted,
-        'rejected': count - accepted,
+        'rejected': rejected,
+        'errors': count - accepted - rejected,
         'p50_ms': lat[len(lat) // 2] if lat else 0,
         'p95_ms': lat[min(len(lat) - 1, int(len(lat) * 0.95))] if lat else 0,
         'p99_ms': lat[min(len(lat) - 1, int(len(lat) * 0.99))] if lat else 0
@@ -762,7 +779,7 @@ def logs_requests():
         'to_timestamp': request.args.get('to_timestamp')
     }
     # Clean filters
-    filters = {k: v for k, v in filters.items() if v and v.lower() != 'all'}
+    filters = {k: v for k, v in filters.items() if v and not (k in ('algorithm', 'decision') and v.lower() == 'all')}
     page = request.args.get('page', 1)
     page_size = request.args.get('page_size', 50)
     try:

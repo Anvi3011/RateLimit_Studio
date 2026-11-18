@@ -79,3 +79,13 @@ def test_expired_marker_never_duplicates_database_row(db_session, event):
     assert db_session.query(RequestLog).count() == 1
     # Worker telemetry is seven-day scoped, not the durable audit count.
     assert r.get('ratelimit:worker:processed') == '2'
+
+@pytest.mark.parametrize(('status', 'decision', 'stored'), [
+    (200, 'accepted', 'ALLOWED'), (429, 'rejected', 'REJECTED'),
+    (503, 'rejected', 'ERROR'), (429, 'unknown', 'ERROR'),
+])
+def test_persisted_classification_requires_http_and_decision_agreement(db_session, event, status, decision, stored):
+    r = fakeredis.FakeRedis(decode_responses=True)
+    assert process(dict(event, status=status, decision=decision), r, db_session)
+    row = db_session.query(RequestLog).one()
+    assert (row.response_status, row.rate_limit_decision) == (status, stored)

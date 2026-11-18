@@ -13,7 +13,7 @@ function delay(ms, signal) {
   });
 }
 
-export async function runTraffic({ count, rps, clientId = 'demo-client', endpoint = '/api/demo',
+export async function runTraffic({ count, rps, clientId = 'demo-client', endpoint,
   signal, onProgress = () => {}, fetchImpl = globalThis.fetch,
   now = () => performance.now(), wait = delay, limits = TRAFFIC_LIMITS }) {
   if (!Number.isInteger(count) || count < 1 || count > TRAFFIC_LIMITS.maxCount)
@@ -25,12 +25,15 @@ export async function runTraffic({ count, rps, clientId = 'demo-client', endpoin
   const cancel = () => controller.abort('cancelled');
   signal?.addEventListener('abort', cancel, { once: true });
   if (signal?.aborted) cancel();
-  const started = now();
+  let started;
   const result = { requested: count, attempted: 0, accepted: 0, rejected: 0, errors: 0,
     unknown: 0, enqueueWarnings: 0, targetRps: rps, stopReason: null };
   const deadline = setTimeout(() => controller.abort('duration_limit'), limits.maxDurationMs);
-  const snapshot = () => ({ ...result, elapsedSeconds: Math.max(0, now() - started) / 1000,
-    achievedRps: result.attempted / Math.max(.001, (now() - started) / 1000) });
+  const snapshot = () => {
+    const elapsedSeconds = started === undefined ? 0 : Math.max(0, now() - started) / 1000;
+    return { ...result, elapsedSeconds,
+      achievedRps: elapsedSeconds > 0 ? result.attempted / elapsedSeconds : 0 };
+  };
   const pending = new Set();
 
   async function request(path, options = {}) {
@@ -86,13 +89,15 @@ export async function runTraffic({ count, rps, clientId = 'demo-client', endpoin
         result.stopReason ||= 'session_unavailable';
       }
     }
-    let nextAt = now();
+    started = now();
+    let nextAt = started;
     while (result.attempted < count && !controller.signal.aborted && !result.stopReason) {
       if (pending.size >= limits.maxInFlight) {
         await Promise.race(pending);
         continue;
       }
-      await wait(Math.max(0, nextAt - now()), controller.signal);
+      const remaining = nextAt - now();
+      if (remaining > 0) await wait(remaining, controller.signal);
       if (controller.signal.aborted || result.stopReason) break;
       // Space actual submissions. Do not burst to catch up after a slow response
       // or a background-tab timer delay.
@@ -100,7 +105,8 @@ export async function runTraffic({ count, rps, clientId = 'demo-client', endpoin
       result.attempted++;
       const task = attempt();
       pending.add(task);
-      task.finally(() => pending.delete(task));
+      task.then(() => pending.delete(task), () => pending.delete(task));
+      onProgress(snapshot());
     }
     await Promise.all(pending);
     if (controller.signal.aborted) result.stopReason = controller.signal.reason;

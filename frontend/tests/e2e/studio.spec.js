@@ -36,7 +36,7 @@ test('publicly edits and persists policy, generates traffic, inspects decisions 
   await page.locator('select').filter({ has: page.locator('option[value="token_bucket"]') }).selectOption('token_bucket')
   const rate = page.getByRole('spinbutton', { name: 'Maximum requests / second' })
   await rate.fill('3')
-  await page.waitForTimeout(3500) // Cross background poll while form is dirty
+  await page.waitForTimeout(5500) // Cross background poll while form is dirty
   await expect(rate).toHaveValue('3')
 
   // Public Apply Configuration - no admin token required!
@@ -68,7 +68,7 @@ test('publicly edits and persists policy, generates traffic, inspects decisions 
 
   // Logs & Analytics
   await page.getByRole('button', { name: 'Logs & Analytics' }).click()
-  await expect(page.getByText(/Logs are stored persistently in the database/)).toBeVisible()
+  await expect(page.getByText(/Records appear after the asynchronous worker commits them/)).toBeVisible()
   await expect(page.getByText('TOTAL REQUESTS')).toBeVisible()
 
   // Fault Injection: verify the safe, disabled configuration

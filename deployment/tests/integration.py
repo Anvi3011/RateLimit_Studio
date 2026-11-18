@@ -38,6 +38,26 @@ def eventually(check, timeout=30):
     raise AssertionError('Timed out waiting for real pipeline persistence')
 
 
+def check_lua(r):
+    from app.algorithms.scripts import SLIDING_WINDOW, TOKEN_BUCKET
+
+    key = 'rl:integration:' + uuid.uuid4().hex
+    bucket_key = key + ':bucket'
+    window_key = key + ':window'
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        bucket = list(pool.map(
+            lambda _: r.eval(TOKEN_BUCKET, 1, bucket_key, 100000, 2, 4, 1, 30)[0], range(16)))
+        window = list(pool.map(
+            lambda i: r.eval(SLIDING_WINDOW, 1, window_key, 100000, 1, 4, str(i))[0], range(16)))
+    assert sum(bucket) == sum(window) == 4
+    assert r.eval(TOKEN_BUCKET, 1, bucket_key, 100499, 2, 4, 1, 30)[0] == 0
+    assert r.eval(TOKEN_BUCKET, 1, bucket_key, 100500, 2, 4, 1, 30)[0] == 1
+    assert r.eval(SLIDING_WINDOW, 1, window_key, 100999, 1, 4, 'early')[0] == 0
+    assert r.eval(SLIDING_WINDOW, 1, window_key, 101000, 1, 4, 'boundary')[0] == 1
+    assert r.ttl(bucket_key) > 0 and r.ttl(window_key) > 0
+    print('PASS: controlled-clock Lua concurrency, refill, rolling window boundary and TTL on real Redis', flush=True)
+
+
 def main():
     engine = create_engine(os.environ['DATABASE_URL'], pool_pre_ping=True)
     from app.db import get_engine as backend_engine
@@ -46,16 +66,17 @@ def main():
         with factory().connect() as connection:
             assert connection.exec_driver_sql('SHOW statement_timeout').scalar() == '10s'
     r = redis.Redis.from_url(os.environ['REDIS_URL'], decode_responses=True)
+    check_lua(r)
     a, b = browser(), browser()
     sid_a = call(a, '/session')[1]['session_id']
     sid_b = call(b, '/session')[1]['session_id']
     assert sid_a != sid_b
     assert call(a, '/health')[1]['database'] == 'healthy'
     original = []
+    client_id = str(uuid.uuid4())
     for algorithm in ('token_bucket', 'sliding_window'):
         assert call(a, '/config', 'PUT', {'algorithm': algorithm, 'rate': 1, 'burst': 1,
                                         'window_seconds': 10})[0] == 200
-        client_id = str(uuid.uuid4())
         statuses = []
         for _ in range(12):
             status, event = call(a, '/requests/test', 'POST', {'client_id': client_id})
@@ -71,7 +92,19 @@ def main():
     eventually(all_saved)
     logs = call(a, '/logs/requests')[1]
     assert logs['total'] == 24
-    assert {row['algorithm'] for row in logs['items']} == {'token_bucket', 'sliding_window'}
+    by_id = {row['request_id']: row for row in logs['items']}
+    for event in original:
+        row = by_id[event['request_id']]
+        assert (row['algorithm'], row['response_status'], row['rate_limit_decision']) == (
+            event['algorithm'], event['status'], event['rate_limit_decision'])
+    counts = call(a, '/logs/summary')[1]
+    assert counts['allowed_requests'] == sum(event['status'] == 200 for event in original)
+    assert counts['rejected_requests'] == sum(event['status'] == 429 for event in original)
+    assert counts['failed_operations'] == 0
+    assert call(a, '/logs/configurations')[1]['total'] == 2
+    assert any(event['event_type'] == 'CONFIGURATION_APPLIED'
+               for event in call(a, '/logs/system-events')[1]['items'])
+    assert call(b, '/logs/configurations')[1]['total'] == 0
     assert call(a, '/metrics')[1]['total'] == 24
     assert any(p['requests'] for p in call(a, '/metrics/timeseries')[1]['points'])
 

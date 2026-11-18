@@ -192,19 +192,12 @@ def get_logs_summary(session_id, db_session=None):
     session = db_session or get_session_factory()()
     close = db_session is None
     try:
-        total = session.query(func.count(RequestLog.id)).filter(RequestLog.demo_session_id == session_id).scalar() or 0
-        allowed = session.query(func.count(RequestLog.id)).filter(
-            RequestLog.demo_session_id == session_id,
-            RequestLog.rate_limit_decision == 'ALLOWED'
-        ).scalar() or 0
-        rejected = session.query(func.count(RequestLog.id)).filter(
-            RequestLog.demo_session_id == session_id,
-            RequestLog.rate_limit_decision == 'REJECTED'
-        ).scalar() or 0
-        failed = session.query(func.count(RequestLog.id)).filter(
-            RequestLog.demo_session_id == session_id,
-            or_(RequestLog.response_status >= 500, RequestLog.rate_limit_decision == 'ERROR')
-        ).scalar() or 0
+        total, allowed, rejected = session.query(
+            func.count(RequestLog.id),
+            func.count().filter(RequestLog.response_status == 200, RequestLog.rate_limit_decision == 'ALLOWED'),
+            func.count().filter(RequestLog.response_status == 429, RequestLog.rate_limit_decision == 'REJECTED'),
+        ).filter(RequestLog.demo_session_id == session_id).one()
+        failed = total - allowed - rejected
         config_changes = session.query(func.count(ConfigurationLog.id)).filter(
             ConfigurationLog.demo_session_id == session_id
         ).scalar() or 0
@@ -239,7 +232,7 @@ def get_request_logs(session_id, filters=None, page=1, page_size=50, db_session=
         if filters.get('decision'):
             query = query.filter(RequestLog.rate_limit_decision == filters['decision'].upper())
         if filters.get('client_id'):
-            query = query.filter(RequestLog.client_id.ilike(f"%{filters['client_id']}%"))
+            query = query.filter(RequestLog.client_id.icontains(filters['client_id'], autoescape=True))
         if filters.get('endpoint'):
             query = query.filter(RequestLog.endpoint.ilike(f"%{filters['endpoint']}%"))
         if filters.get('request_id'):

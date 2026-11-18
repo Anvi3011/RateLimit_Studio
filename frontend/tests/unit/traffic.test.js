@@ -174,3 +174,19 @@ test('overall duration is bounded and cancellation before launch sends nothing',
   assert.equal(cancelled.attempted, 0);
   assert.equal(cancelled.stopReason, 'cancelled');
 });
+
+test('session setup latency is excluded from measured traffic rate', async () => {
+  let clock = 0;
+  const result = await runTraffic({
+    count: 3, rps: 10, now: () => clock, wait: async (ms) => { clock += ms; },
+    fetchImpl: async (path) => {
+      if (path === '/api/session') {
+        clock += 5000;
+        return session();
+      }
+      return accepted();
+    }
+  });
+  assert.equal(result.elapsedSeconds, 0.2);
+  assert.equal(result.attempted, 3);
+});

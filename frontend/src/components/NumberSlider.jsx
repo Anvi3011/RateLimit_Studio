@@ -15,6 +15,7 @@ export default function NumberSlider({ id, label, info, value, onChange, min = 1
     if (valid && Number(value) > extendedMax) setExtendedMax(Number(value));
   }, [value, valid, extendedMax]);
   const normalize = () => {
+    if (valid) return;
     const number = value === '' ? fallback : Number(value);
     onChange(Number.isFinite(number) ? Math.min(inputMax, Math.max(min, Math.round(number))) : fallback);
   };
