@@ -26,6 +26,8 @@ services:
         sync: false
       - key: FAULTS_ENABLED
         value: "false"
+      - key: PUBLIC_FAULT_MODE
+        value: "disabled"
       - key: PROXY_X_FOR
         value: "0"
       - key: PROXY_X_PROTO

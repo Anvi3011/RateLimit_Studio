@@ -131,7 +131,8 @@ def log_fault_recovery(session_id, fault_type=None, recovery_status='MANUAL_RECO
         now = _utcnow()
         query = session.query(FaultInjectionLog).filter(
             FaultInjectionLog.demo_session_id == session_id,
-            FaultInjectionLog.fault_status == 'ACTIVE'
+            FaultInjectionLog.fault_status == 'ACTIVE',
+            FaultInjectionLog.simulation_end_time > now
         )
         if fault_type:
             query = query.filter(FaultInjectionLog.fault_type == fault_type)
@@ -320,12 +321,19 @@ def get_fault_logs(session_id, page=1, page_size=50, db_session=None):
         page = max(1, int(page))
         page_size = min(100, max(1, int(page_size)))
         rows = query.order_by(desc(FaultInjectionLog.simulation_start_time)).offset((page - 1) * page_size).limit(page_size).all()
-        return {
-            'items': [r.to_dict() for r in rows],
-            'total': total,
-            'page': page,
-            'page_size': page_size
-        }
+        items = []
+        now = _utcnow()
+        for row in rows:
+            item = row.to_dict()
+            end = row.simulation_end_time
+            if row.fault_status == 'ACTIVE' and end:
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=timezone.utc)
+                if end <= now:
+                    item.update(fault_status='CLEARED', recovery_status='AUTO_RECOVERED',
+                                recovery_timestamp=end.isoformat())
+            items.append(item)
+        return {'items': items, 'total': total, 'page': page, 'page_size': page_size}
     except Exception as e:
         logger.error("Database read failed (%s)", type(e).__name__)
         raise

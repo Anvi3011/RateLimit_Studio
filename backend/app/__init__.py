@@ -17,6 +17,8 @@ def create_app(test_config=None):
 
     app.config.update(
         MAX_CONTENT_LENGTH=64 * 1024,
+        PUBLIC_DEMO=os.getenv('PUBLIC_DEMO', 'false') == 'true',
+        PUBLIC_FAULT_MODE=os.getenv('PUBLIC_FAULT_MODE', 'disabled'),
         FAULTS_ENABLED=os.getenv('FAULTS_ENABLED', 'false').lower() == 'true',
         REDIS_URL=os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
         RABBITMQ_URL=os.getenv('RABBITMQ_URL', 'amqp://localhost:5672/%2F'),

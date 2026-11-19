@@ -81,3 +81,19 @@ def test_worker_fault_control_pauses_and_recovers_consumer():
         routes.store().set('ratelimit:worker:last_seen', '1', ex=15)
         time.sleep(0.5)
     assert client.get('/api/worker/status').get_json()['status'] == 'healthy'
+
+def test_fault_history_reports_expired_and_manual_recovery(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from app.db import service
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(service, '_utcnow', lambda: now)
+    app = create_app({'TESTING': True, 'FAULTS_ENABLED': True})
+    browser = app.test_client()
+    assert browser.post('/api/faults', json={'name': 'api_degraded', 'duration_seconds': 1}).status_code == 200
+    assert browser.post('/api/faults', json={'name': 'redis_unavailable', 'duration_seconds': 60}).status_code == 200
+    now += timedelta(seconds=2)
+    assert browser.delete('/api/faults').status_code == 200
+    records = {row['fault_type']: row for row in browser.get('/api/logs/faults').json['items']}
+    assert records['api_degraded']['recovery_status'] == 'AUTO_RECOVERED'
+    assert records['redis_unavailable']['recovery_status'] == 'MANUAL_RECOVERED'

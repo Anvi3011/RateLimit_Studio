@@ -235,8 +235,14 @@ function App() {
   const [rows, setRows] = useState([]);
   const [inspectorDecision, setInspectorDecision] = useState('all');
   const [inspectorClient, setInspectorClient] = useState('');
-  const [faults, setFaults] = useState({});
-  const [faultTtl, setFaultTtl] = useState({});
+  const [faultState, setFaultState] = useState(null);
+  const [faultBusy, setFaultBusy] = useState(false);
+  const [faultProbe, setFaultProbe] = useState(null);
+  const faultVersion = useRef(0);
+  const faults = faultState?.active || {};
+  const faultTtl = faultState?.ttl_seconds || {};
+  const simulation = faultState?.mode === 'simulation';
+  const faultLimit = faultState?.max_duration_seconds || 300;
   const [faultDuration, setFaultDuration] = useState(60);
   const [series, setSeries] = useState([]);
   const [msg, setMsg] = useState('');
@@ -372,6 +378,7 @@ function App() {
     if (refreshRunning.current) return;
     refreshRunning.current = true;
     const revision = configRevision.current;
+    const faultRevision = faultVersion.current;
     try {
       if (!sessionStarted.current) {
         const session = await call('/session');
@@ -390,8 +397,7 @@ function App() {
         ['/health', setH],
         ['/history?page_size=50', (data) => setRows(data.items || [])],
         ['/faults', (data) => {
-          setFaults(data.active || {});
-          setFaultTtl(data.ttl_seconds || {});
+          if (faultRevision === faultVersion.current && faultRevision % 2 === 0) setFaultState(data);
         }],
         ['/metrics/timeseries?seconds=300&bucket_seconds=5', (data) => setSeries(data.points || [])]
       ];
@@ -482,27 +488,36 @@ function App() {
     }
   }
 
-  async function toggle(k, on) {
+  async function changeFaults(name, enabled) {
+    faultVersion.current++;
+    setFaultBusy(true);
     try {
-      await call('/faults', {
+      const next = await call('/faults', name ? {
         method: 'POST',
-        body: JSON.stringify({ name: k, enabled: on, value: 250, duration_seconds: faultDuration })
-      });
-      refresh();
-      if (tab === 'Logs & Analytics') refreshLogs();
-    } catch (e) {
-      setMsg(e.message);
+        body: JSON.stringify({
+          name, enabled, duration_seconds: Math.min(faultDuration, faultLimit),
+          ...(!simulation && { value: 250 })
+        })
+      } : { method: 'DELETE' });
+      setFaultState(name || simulation ? next : { ...faultState, active: {}, ttl_seconds: {} });
+      setFaultProbe(null);
+      setMsg(name ? (enabled ? 'Fault activated for this session.' : 'Fault restored.') : 'All session faults restored.');
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      faultVersion.current++;
+      setFaultBusy(false);
     }
   }
 
-  async function resetAllFaults() {
+  async function runFaultProbe(name) {
+    setFaultBusy(true);
     try {
-      await call('/faults', { method: 'DELETE' });
-      setMsg('All simulated faults have been restored');
-      refresh();
-      if (tab === 'Logs & Analytics') refreshLogs();
-    } catch (e) {
-      setMsg(e.message);
+      setFaultProbe(await call('/faults/probe/' + name));
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setFaultBusy(false);
     }
   }
 
@@ -1314,7 +1329,10 @@ function App() {
         {tab === 'Fault Injection' && (
           <div className="panel">
             <h2>Controlled fault injection</h2>
-            <p>Simulate failures safely. Faults are strictly isolated to your demo session and do not disrupt other visitors.</p>
+            <p>{!faultState ? 'Loading fault settings...' : !faultState.enabled
+              ? 'Fault simulations are disabled for this deployment.'
+              : simulation ? 'Activate a fault, then run its probe. The probe models your session outcome. Normal traffic and service health remain live.'
+              : 'Faults apply to your demo session.'}</p>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '15px', maxWidth: '380px', marginTop: '16px' }}>
               <label className="admin" style={{ maxWidth: '100%', margin: 0 }}>
@@ -1322,9 +1340,10 @@ function App() {
                 <input
                   type="number"
                   min="1"
-                  max="300"
-                  value={faultDuration}
-                  onChange={(e) => setFaultDuration(Math.max(1, Math.min(300, +e.target.value || 1)))}
+                  max={faultLimit}
+                  disabled={!faultState?.enabled || faultBusy}
+                  value={Math.min(faultDuration, faultLimit)}
+                  onChange={(e) => setFaultDuration(Math.max(1, Math.min(faultLimit, Math.trunc(+e.target.value) || 1)))}
                 />
               </label>
             </div>
@@ -1332,48 +1351,38 @@ function App() {
             {[
               ['redis_unavailable', 'Redis unavailable', 'Exercises configured fail-open or fail-closed behavior.', 'Redis unavailable'],
               ['rabbitmq_unavailable', 'RabbitMQ unavailable', 'Decisions continue; event publishing is suppressed.', 'RabbitMQ'],
-              ['worker_unavailable', 'Worker unavailable', 'Consumer pauses; queue depth should rise and drain after recovery.', 'Worker crash'],
+              ['worker_unavailable', 'Worker unavailable', 'Shows a simulated stale worker status for this session.', 'Worker crash'],
               ['api_degraded', 'API degraded', 'Adds controlled processing delay.', 'Recovery behaviour'],
-              ['network_timeout', 'Network timeout', 'Exceeds the reverse proxy read timeout; expires automatically.', 'Network partition'],
+              ['network_timeout', 'Network timeout', 'Adds a six-second delay to external test requests.', 'Network partition'],
               ['latency_ms', 'Artificial latency', 'Adds 250 ms to decision processing.', 'Recovery behaviour']
-            ].map(([key, title, desc, infoTermKey]) => (
+            ].filter(([key]) => !simulation || faultState.available.includes(key)).map(([key, title, desc, infoTermKey]) => (
               <div className="faultrow" key={key}>
                 <div>
                   <b>
                     {title} <InfoBtn term={infoTermKey} />
                   </b>
                   <small>
-                    {desc}
-                    {faults[key] && faultTtl[key] ? ` · expires in ${faultTtl[key]}s` : ''}
+                    {simulation ? (faults[key] ? 'Active simulation' : 'Inactive') : desc}
+                    {faults[key] && faultTtl[key] != null ? ` (expires in ${faultTtl[key]}s)` : ''}
                   </small>
+                  {faultProbe?.name === key && faultProbe.active === Boolean(faults[key]) && (
+                    <p role="status">{faultProbe.stage}: {faultProbe.outcome}. {faultProbe.simulated_http_status
+                      ? `Simulated HTTP ${faultProbe.simulated_http_status}. ` : ''}{faultProbe.description}</p>
+                  )}
                 </div>
-                <button
-                  className={faults[key] ? 'danger' : 'secondary'}
-                  onClick={() => {
-                    const prompt = 'This will simulate a component failure for your demo session. Continue?';
-                    if (window.confirm(prompt)) {
-                      toggle(key, !faults[key]);
-                    }
-                  }}
-                >
-                  {faults[key] ? 'Restore' : 'Inject'}
+                {simulation && <button className="secondary" disabled={faultBusy}
+                  onClick={() => runFaultProbe(key)}>Run probe</button>}
+                <button className={faults[key] ? 'danger' : 'secondary'}
+                  disabled={!faultState?.enabled || faultBusy}
+                  onClick={() => changeFaults(key, !faults[key])}>
+                  {faults[key] ? 'Restore' : 'Activate'}
                 </button>
               </div>
             ))}
 
-            <button
-              className="textbtn"
-              style={{ marginTop: '14px' }}
-              onClick={() => {
-                setConfirmDialog({
-                  title: 'Restore All Faults',
-                  message: 'This will remove all active fault simulations and restore normal system operations.',
-                  danger: true,
-                  onConfirm: resetAllFaults,
-                  confirmText: 'Restore All Faults'
-                });
-              }}
-            >
+            <button className="textbtn" style={{ marginTop: '14px' }}
+              disabled={!faultState?.enabled || faultBusy || !Object.keys(faults).length}
+              onClick={() => changeFaults()}>
               Restore all faults
             </button>
           </div>

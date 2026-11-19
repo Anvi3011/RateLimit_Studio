@@ -26,3 +26,5 @@ def validate_public_config():
         raise RuntimeError('Public mode requires REQUIRE_POSTGRES=true')
     if os.getenv('FAULTS_ENABLED', 'false') != 'false':
         raise RuntimeError('Public mode requires FAULTS_ENABLED=false')
+    if os.getenv('PUBLIC_FAULT_MODE', 'disabled') not in ('disabled', 'simulation'):
+        raise RuntimeError('PUBLIC_FAULT_MODE must be disabled or simulation')

@@ -28,13 +28,13 @@ These are future operator steps, not actions executed by Phase 2. The current lo
 6. Reserve the Vercel project name so the exact production URL is known. Vercel root directory is **`frontend`**, build is `npm ci && npm run build`, output is `dist`, and the Node major should match the tested Node 22 image. Use the lockfile. No provider secrets belong in Vercel.
 7. Replace only the non-secret placeholder backend hostname in `frontend/vercel.json` with the actual Render service hostname before publishing the reviewed configuration. This is configuration, not a React edit. API rewrite must stay before the SPA fallback. Avoid unreviewed preview origins; use the production URL for validation.
 8. In Render, import the correct repository and branch `deployment/dual-mode`, selecting this repository's root `render.yaml`. It defines a single Free Docker web service with automatic deployment **off**. Alternatively create that one Free Docker service manually with Dockerfile `deployment/public/Dockerfile`, build context `.`, and health path `/api/live`. Do not create worker services or Render data stores.
-9. Privately enter `DATABASE_URL`, `REDIS_URL`, `RABBITMQ_URL`, `SESSION_SECRET` and exact `FRONTEND_ORIGIN=https://YOUR_PROJECT.vercel.app`. See `.env.public.example` for the complete variable contract. Leave `PUBLIC_DEMO=true`, `REQUIRE_POSTGRES=true`, `FAULTS_ENABLED=false`. Do not load this file over the local `.env`. Render supplies `PORT`.
+9. Privately enter `DATABASE_URL`, `REDIS_URL`, `RABBITMQ_URL`, `SESSION_SECRET` and exact `FRONTEND_ORIGIN=https://YOUR_PROJECT.vercel.app`. See `.env.public.example` for the complete variable contract. Keep `PUBLIC_DEMO=true`, `REQUIRE_POSTGRES=true`, and `FAULTS_ENABLED=false`. Set `PUBLIC_FAULT_MODE=simulation` on the existing Render API service to enable the session probe. Omit it or set it to `disabled` to disable the probe. Do not load this file over the local `.env`. Render supplies `PORT`.
 10. After explicit deployment approval, start Render and verify liveness and dependency readiness; then publish Vercel. Inspect the browser network panel to verify Set-Cookie round trips, stable sessions, no cached personalized responses and same-origin `/api` calls. Check two independent browser profiles cannot read each other's history/configuration. Verify configuration PUT, traffic POST, charts, request history and CSV. Match returned request IDs against actual Neon rows. Do not display provider URLs/credentials in screenshots.
 11. Test one real Render sleep/wake cycle, backlog drain and a controlled child-process restart before sharing the URL. Confirm no existing Lab service is needed. Record current quotas and usage in each dashboard. A dashboard returning an empty log list is not sufficient evidence of persistence.
 
 ## Security and failure behavior
 
-- Public startup requires PostgreSQL and TLS provider URLs, a strong session secret, explicit HTTPS frontend origins, and disabled fault injection. Production never silently falls back to SQLite. The isolated tests use SQLite/fakes only for unit checks, never for the deployed demo.
+- Public startup requires PostgreSQL and TLS provider URLs, a strong session secret, explicit HTTPS frontend origins, and disabled legacy fault controls. Production never silently falls back to SQLite. The isolated tests use SQLite/fakes only for unit checks, never for the deployed demo.
 - Browser cookie stays HttpOnly, SameSite=Lax, host-only and Secure in public mode. CSRF checks remain active. API responses use `Cache-Control: no-store`; Vercel also disables API caching and supplies the existing security policy headers.
 - Public mode trusts **zero** incoming forwarding headers rather than guessing the Vercel/Render hop chain. Secure cookies do not depend on a spoofable scheme header. Default header client identity is recommended. IP identity still executes, but groups callers by the Render-facing proxy address within each session; accurate real-IP identity requires separately verified provider header trust.
 - `/api/logs/cleanup` is disabled in public mode because it affects multiple visitors. There is no automatic destructive cleanup. Retention extends with session activity, so storage still needs operator monitoring. Review any future cleanup separately.
@@ -56,3 +56,19 @@ Official references checked during preparation: [Render Free](https://render.com
 ## Local environment stays separate
 
 Continue using the existing `docker-compose.yml` and local `.env` for the eight-service local deployment. No public provider URL is injected into it. All existing volume definitions remain unchanged. EC2 uses the additional reviewed overrides described in `deployment/aws/DUAL_MODE.md`. The public Dockerfile and Render manifest do not start PostgreSQL/Redis/RabbitMQ inside Render; they connect to the three genuine external services.
+
+
+## Public fault simulation
+
+Open Fault Injection, activate one of the five scenarios and select Run probe. The
+page displays the modeled stage and outcome. Redis and API failures model HTTP
+503, the network timeout models HTTP 504, RabbitMQ models an outbox retry, and the
+worker scenario models a pending queue delivery. The probe response itself uses
+HTTP 200 to return the model. It never sleeps, changes the limiter, suppresses
+publishing, pauses consumers or adds synthetic requests to analytics.
+
+Activation expires in 1 to 60 seconds and can be restored earlier in the same
+signed browser session. Probes read the current TTL. Fault history shows
+automatic recovery once the recorded expiry passes. Normal request logs and
+health endpoints continue to report real outcomes. The example environment
+opts into simulation, while the Render blueprint defaults to disabled.

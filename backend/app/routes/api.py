@@ -5,9 +5,10 @@ import logging
 import os
 import time
 import uuid
-from flask import Blueprint, current_app, jsonify, request, g, Response
+from flask import Blueprint, current_app, has_app_context, jsonify, request, g, Response
 from ..redis import client, decide
 from ..session import get_current_session_id
+from ..faults import PROBES, PUBLIC_DURATION_LIMIT, probe_result
 from ..db import (
     log_configuration_change,
     log_fault_injection,
@@ -56,6 +57,8 @@ def config_value(session_id=None):
     return cfg
 
 def active_faults(session_id=None):
+    if has_app_context() and current_app.config['PUBLIC_DEMO']:
+        return {}
     sid = session_id or get_session_id()
     active = {}
     fault_names = ('redis_unavailable', 'rabbitmq_unavailable', 'worker_unavailable', 'api_degraded', 'network_timeout')
@@ -608,9 +611,69 @@ def worker_status():
 # =====================================================================
 # FAULT SIMULATION (PUBLIC, CONTROLLED, SESSION-ISOLATED)
 # =====================================================================
+def public_fault_key(sid, name):
+    return f'ratelimit:simulation:{sid}:{name}'
+
+
+def public_fault_status(sid):
+    enabled = current_app.config['PUBLIC_FAULT_MODE'] == 'simulation'
+    ttl = {}
+    if enabled:
+        with store().pipeline(transaction=False) as pipe:
+            for name in PROBES:
+                pipe.ttl(public_fault_key(sid, name))
+            ttl = {name: remaining for name, remaining in zip(PROBES, pipe.execute()) if remaining >= 0}
+    return dict(enabled=enabled, mode='simulation' if enabled else 'disabled',
+                available=list(PROBES) if enabled else [], max_duration_seconds=PUBLIC_DURATION_LIMIT,
+                active=dict.fromkeys(ttl, True), ttl_seconds=ttl)
+
+
+@api.get('/faults/probe/<name>')
+def public_fault_probe(name):
+    if not current_app.config['PUBLIC_DEMO'] or current_app.config['PUBLIC_FAULT_MODE'] != 'simulation':
+        return jsonify(error='fault_injection_disabled'), 403
+    if name not in PROBES:
+        return jsonify(error='unsupported_fault'), 400
+    try:
+        active = store().ttl(public_fault_key(get_session_id(), name)) >= 0
+    except Exception:
+        return jsonify(error='redis_unavailable'), 503
+    return jsonify(probe_result(name, active))
+
+
+def set_public_fault(sid):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or any(k not in ('name', 'enabled', 'duration_seconds') for k in data):
+        return jsonify(error='invalid_fault_parameters'), 400
+    name = data.get('name')
+    if not isinstance(name, str) or name not in PROBES:
+        return jsonify(error='unsupported_fault'), 400
+    enabled = data.get('enabled', True)
+    duration = data.get('duration_seconds', PUBLIC_DURATION_LIMIT)
+    if type(enabled) is not bool or type(duration) is not int or not 1 <= duration <= PUBLIC_DURATION_LIMIT:
+        return jsonify(error='invalid_fault_parameters'), 400
+    try:
+        r = store()
+        key = public_fault_key(sid, name)
+        if enabled:
+            # Idempotent activation. A repeated request does not extend the lease or duplicate the audit row.
+            if r.set(key, '1', ex=duration, nx=True):
+                log_fault_injection(sid, name, PROBES[name][0], duration, 'Public session probe simulation')
+        elif r.delete(key):
+            log_fault_recovery(sid, name)
+        return jsonify(public_fault_status(sid))
+    except Exception:
+        return jsonify(error='fault_state_unavailable'), 503
+
+
 @api.get('/faults')
 def get_faults():
     sid = get_session_id()
+    if current_app.config['PUBLIC_DEMO']:
+        try:
+            return jsonify(public_fault_status(sid))
+        except Exception:
+            return jsonify(error='redis_unavailable'), 503
     active = active_faults(sid)
     ttl = {}
     try:
@@ -623,6 +686,10 @@ def get_faults():
 
 @api.post('/faults')
 def set_faults():
+    if current_app.config['PUBLIC_DEMO']:
+        if current_app.config['PUBLIC_FAULT_MODE'] != 'simulation':
+            return jsonify(error='fault_injection_disabled'), 403
+        return set_public_fault(get_session_id())
     if not current_app.config['FAULTS_ENABLED']:
         return jsonify(error='fault_injection_disabled'), 403
     sid = get_session_id()
@@ -673,6 +740,15 @@ def set_faults():
 @api.delete('/faults')
 def reset_faults():
     sid = get_session_id()
+    if current_app.config['PUBLIC_DEMO']:
+        if current_app.config['PUBLIC_FAULT_MODE'] != 'simulation':
+            return jsonify(error='fault_injection_disabled'), 403
+        try:
+            if store().delete(*(public_fault_key(sid, name) for name in PROBES)):
+                log_fault_recovery(sid)
+            return jsonify(public_fault_status(sid))
+        except Exception:
+            return jsonify(error='fault_state_unavailable'), 503
     try:
         r = store()
         for name in ('redis_unavailable', 'rabbitmq_unavailable', 'worker_unavailable', 'api_degraded', 'network_timeout', 'latency_ms'):

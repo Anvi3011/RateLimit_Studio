@@ -90,3 +90,32 @@ test('publicly edits and persists policy, generates traffic, inspects decisions 
   expect(injectResponse.status()).toBe(403)
   expect((await injectResponse.json()).error).toBe('fault_injection_disabled')
 })
+
+test('public fault panel activates, probes and restores a session simulation', async ({ page }) => {
+  const name = 'network_timeout'
+  let active = false
+  await page.route('**/api/faults', async (route) => {
+    if (route.request().method() === 'POST') {
+      const payload = route.request().postDataJSON()
+      expect(payload).toEqual({ name, enabled: !active, duration_seconds: 60 })
+      active = payload.enabled
+    }
+    await route.fulfill({ json: {
+      enabled: true, mode: 'simulation', max_duration_seconds: 60, available: [name],
+      active: active ? { [name]: true } : {}, ttl_seconds: active ? { [name]: 60 } : {},
+    } })
+  })
+  await page.route('**/api/faults/probe/network_timeout', (route) => route.fulfill({
+    json: { name, stage: 'response', active, outcome: 'timeout', simulated_http_status: 504,
+      description: 'The proxy returns a gateway timeout in this scenario.' },
+  }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Fault Injection', exact: true }).click()
+  await page.getByRole('button', { name: 'Activate', exact: true }).click()
+  await expect(page.getByText(/Active simulation.*expires in 60s/)).toBeVisible()
+  await page.getByRole('button', { name: 'Run probe', exact: true }).click()
+  await expect(page.getByText(/Simulated HTTP 504/)).toBeVisible()
+  await page.getByRole('button', { name: 'Restore', exact: true }).click()
+  await expect(page.getByText('Inactive', { exact: true })).toBeVisible()
+  await expect(page.getByText(/Simulated HTTP 504/)).toHaveCount(0)
+})
