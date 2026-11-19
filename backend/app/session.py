@@ -3,11 +3,33 @@ import uuid
 import hmac
 import hashlib
 import re
+import time
+from collections import OrderedDict
+from threading import Lock
 from flask import request, g, has_request_context, current_app
 from .db import touch_session
 
 SESSION_PATTERN = re.compile(r'^s_[a-f0-9]{32}_[a-f0-9]{16}$')
 RETENTION_HOURS = int(os.getenv('LOG_RETENTION_HOURS', '24'))
+
+class SessionTouches:
+    # Coalesce successful activity updates within a process. Request logging
+    # still writes every decision. A restart simply loses this short-lived cache.
+    def __init__(self):
+        self.recent = OrderedDict()
+        self.lock = Lock()
+
+    def is_recent(self, session_id):
+        with self.lock:
+            return self.recent.get(session_id, float('-inf')) > time.monotonic() - 10
+
+    def remember(self, session_id):
+        with self.lock:
+            self.recent[session_id] = time.monotonic()
+            self.recent.move_to_end(session_id)
+            if len(self.recent) > 1024:
+                self.recent.popitem(last=False)
+
 
 def _get_secret():
     if has_request_context():
@@ -60,7 +82,12 @@ def get_current_session_id():
     return g.session_id
 
 def _record_touch(session_id):
+    recent = current_app.extensions.get('session_touches')
+    if recent is not None and recent.is_recent(session_id):
+        return
     try:
-        touch_session(session_id, retention_hours=RETENTION_HOURS)
+        touched = touch_session(session_id, retention_hours=RETENTION_HOURS)
+        if touched is not None and recent is not None:
+            recent.remember(session_id)
     except Exception:
         pass

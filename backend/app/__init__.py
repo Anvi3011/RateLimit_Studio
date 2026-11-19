@@ -5,7 +5,7 @@ from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 from .routes.api import api
 from .db import init_db
-from .session import get_current_session_id
+from .session import get_current_session_id, SessionTouches
 from .config import validate_public_config
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,9 @@ def create_app(test_config=None):
 
     if test_config:
         app.config.update(test_config)
+
+    if app.config['PUBLIC_DEMO']:
+        app.extensions['session_touches'] = SessionTouches()
 
     # Initialize database tables
     try:

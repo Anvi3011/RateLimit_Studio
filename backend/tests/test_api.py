@@ -97,3 +97,42 @@ def test_fault_history_reports_expired_and_manual_recovery(monkeypatch):
     records = {row['fault_type']: row for row in browser.get('/api/logs/faults').json['items']}
     assert records['api_degraded']['recovery_status'] == 'AUTO_RECOVERED'
     assert records['redis_unavailable']['recovery_status'] == 'MANUAL_RECOVERED'
+
+def test_automatic_edge_selection_uses_saved_edge_count(monkeypatch):
+    from app.routes import api as routes
+
+    app = create_app({'TESTING': True})
+    browser = app.test_client()
+    assert browser.put('/api/config', json={'edge_nodes': 7}).status_code == 200
+
+    def last_edge(edge_count):
+        assert edge_count == 7
+        return edge_count - 1
+
+    monkeypatch.setattr(routes, 'randrange', last_edge)
+    assert browser.post('/api/requests/test', json={'client_id': 'edge-test'}).json['edge_id'] == 'edge-6'
+    explicit = browser.post('/api/requests/test', json={'client_id': 'edge-test', 'edge_id': 'edge-1'})
+    assert explicit.json['edge_id'] == 'edge-1'
+
+
+def test_public_session_touches_coalesce_and_retry_failures(monkeypatch):
+    import app.session as sessions
+
+    app = create_app({'TESTING': True, 'PUBLIC_DEMO': True})
+    clock = 100
+    monkeypatch.setattr(sessions.time, 'monotonic', lambda: clock)
+    touches = []
+
+    def touch(sid, **_):
+        touches.append(sid)
+        return object() if len(touches) > 1 else None
+
+    monkeypatch.setattr(sessions, 'touch_session', touch)
+    browser = app.test_client()
+    sid = browser.get('/api/session').json['session_id']
+    assert browser.get('/api/session').json['session_id'] == sid
+    assert browser.get('/api/session').json['session_id'] == sid
+    assert touches == [sid, sid]
+    clock += 10
+    assert browser.get('/api/session').json['session_id'] == sid
+    assert touches == [sid, sid, sid]

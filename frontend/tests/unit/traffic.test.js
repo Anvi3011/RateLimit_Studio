@@ -190,3 +190,38 @@ test('session setup latency is excluded from measured traffic rate', async () =>
   assert.equal(result.elapsedSeconds, 0.2);
   assert.equal(result.attempted, 3);
 });
+
+test('a high target fills four slots and reports transport backpressure and submission rate', async () => {
+  const pending = [];
+  const starts = [];
+  let clock = 0;
+  let unblock;
+  const observed = new Promise((resolve) => { unblock = resolve; });
+  const run = runTraffic({ count: 8, rps: 10,
+    now: () => clock, wait: async (ms) => { clock += ms; },
+    fetchImpl: async (path, options) => {
+      if (path === '/api/session') return session();
+      assert.equal(JSON.parse(options.body).client_id, 'demo-client');
+      starts.push(clock);
+      return new Promise((resolve) => {
+        pending.push(resolve);
+        if (pending.length === 4) unblock();
+      });
+    },
+  });
+  await observed;
+  await new Promise(setImmediate);
+  assert.deepEqual(starts, [0, 100, 200, 300]);
+  clock = 1000;
+  pending.splice(0).forEach((resolve) => resolve(accepted()));
+  await new Promise(setImmediate);
+  assert.deepEqual(starts, [0, 100, 200, 300, 1000, 1100, 1200, 1300]);
+  clock = 1600;
+  pending.splice(0).forEach((resolve) => resolve(accepted()));
+  const result = await run;
+  assert.equal(result.accepted, 8);
+  assert.ok(Math.abs(result.submissionRps - 7 / 1.3) < 1e-9);
+  assert.equal(result.achievedRps, 5);
+  assert.equal(result.capacityWaitMs, 600);
+  assert.ok(result.averageRoundTripMs > 0);
+});

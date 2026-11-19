@@ -420,7 +420,9 @@ function App() {
 
   useEffect(() => {
     refresh();
-    const x = setInterval(refresh, 5000);
+    const x = setInterval(() => {
+      if (!trafficRun.current) refresh();
+    }, 5000);
     return () => clearInterval(x);
   }, []);
 
@@ -428,7 +430,7 @@ function App() {
     if (tab !== 'Logs & Analytics' || !currentSession) return;
     refreshLogs();
     const timer = setInterval(() => {
-      if (!logRequest.current) refreshLogs();
+      if (!trafficRun.current && !logRequest.current) refreshLogs();
     }, 6000);
     return () => {
       clearInterval(timer);
@@ -455,7 +457,11 @@ function App() {
       const stopped = result.stopReason ? ` · stopped: ${result.stopReason.replaceAll('_', ' ')}` : ' · completed';
       const unknown = result.unknown ? `; ${result.unknown} outcomes unknown; check history before retrying` : '';
       const warnings = result.enqueueWarnings ? `; ${result.enqueueWarnings} logging enqueue warnings` : '';
-      setMsg(`Offered ${result.attempted}: ${result.accepted} accepted, ${result.rejected} rejected, ${result.errors} errors${stopped}. Target ${result.targetRps} RPS; observed ${result.achievedRps.toFixed(1)} requests/sec${unknown}${warnings}`);
+      const pacing = result.submissionRps === null ? '' : ` Browser submission rate ${result.submissionRps.toFixed(1)} RPS.`;
+      const capacity = result.capacityWaitMs >= 1
+        ? ` The browser waited for a free request slot. Average round trip ${Math.round(result.averageRoundTripMs)} ms.`
+        : '';
+      setMsg(`Offered ${result.attempted}: ${result.accepted} accepted, ${result.rejected} rejected, ${result.errors} errors${stopped}. Target ${result.targetRps} RPS; observed ${result.achievedRps.toFixed(1)} requests/sec${unknown}${warnings}.${pacing}${capacity}`);
       refresh();
     } catch (e) {
       setMsg(e.message);
@@ -641,7 +647,7 @@ function App() {
               <i className="dot" />
               {h.healthy ? 'All systems normal' : 'Service degraded'}
             </span>
-            <button className="iconbtn" aria-label="Refresh dashboard data" onClick={() => { refresh(); if (tab === 'Logs & Analytics') refreshLogs(); }}>
+            <button className="iconbtn" aria-label="Refresh dashboard data" onClick={() => { refresh(); if (tab === 'Logs & Analytics') refreshLogs(); }} disabled={trafficRunning}>
               <RefreshCw size={16} />
             </button>
           </div>
@@ -653,7 +659,8 @@ function App() {
         {trafficRunning && (
           <div className="traffic-progress" role="status">
             <span>Submitted {trafficProgress?.attempted ?? 0} of {trafficProgress?.requested ?? 0} requests.
-              {' '}Target {trafficProgress?.targetRps || trafficRps} RPS · measured {(trafficProgress?.achievedRps ?? 0).toFixed(1)} RPS.
+              {' '}Target {trafficProgress?.targetRps || trafficRps} RPS. Browser submission rate{' '}
+              {trafficProgress?.submissionRps == null ? 'pending' : `${trafficProgress.submissionRps.toFixed(1)} RPS`}.
               {' '}{trafficProgress?.accepted ?? 0} accepted · {trafficProgress?.rejected ?? 0} rejected · {trafficProgress?.errors ?? 0} failed.</span>
             <button className="secondary" onClick={() => trafficRun.current?.abort()}>Cancel traffic</button>
           </div>
@@ -875,7 +882,7 @@ function App() {
                 disabled={trafficRunning} note="Safety limit: 500 requests per run." />
               <label>
                 <span>Client identifier <InfoBtn term="X-Client-ID" /></span>
-                <input id="traffic-client" defaultValue="demo-client" />
+                <input id="traffic-client" defaultValue="demo-client" maxLength={128} disabled={trafficRunning} />
               </label>
               <NumberSlider id="traffic-rate" label="Incoming requests / second" info={<InfoBtn term="Request Rate" />}
                 value={trafficRps} onChange={setTrafficRps} max={200} fallback={10}

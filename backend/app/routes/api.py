@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+from random import randrange
 import time
 import uuid
 from flask import Blueprint, current_app, has_app_context, jsonify, request, g, Response
@@ -242,7 +243,8 @@ def test_request():
         policy_unavailable = True
     client_id = str((request.remote_addr if c.get('identity_strategy') == 'ip' else None) or d.get('client_id') or request.headers.get('X-Client-ID') or request.remote_addr or 'anonymous')[:128]
     endpoint = str(d.get('endpoint') or c['endpoint'])[:256]
-    edge = str(d.get('edge_id') or ('edge-' + str(int(time.time() * 1000) % 3)))[:64]
+    edge_count = c.get('edge_nodes', DEFAULT['edge_nodes'])
+    edge = str(d.get('edge_id') or f'edge-{randrange(edge_count)}')[:64]
     started = time.perf_counter()
     started_ts = time.time()
     rid = str(uuid.uuid4())
